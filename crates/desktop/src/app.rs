@@ -392,37 +392,35 @@ impl ChainlinkApp {
                         ui.label("No candles for the selected period.");
                     } else {
                         let bar_secs = resolution.bar_seconds() as i64;
-                        let (box_plot, hline_stroke) = {
-                            let candles = if let Some(p) = &last {
-                                chart::merge_history_with_live(
-                                    &h.candles,
-                                    p.price,
-                                    p.t,
-                                    bar_secs,
-                                    forming_bar,
-                                    sealed_last_row,
-                                )
-                            } else {
-                                // Без тика рисуем с тем же sealed/forming, иначе снова сырой REST.
-                                chart::display_candles_without_live_tick(
-                                    &h.candles,
-                                    sealed_last_row,
-                                    forming_bar,
-                                    bar_secs,
-                                )
-                            };
-                            (
-                                chart::box_plot_from_history(
-                                    &candles,
-                                    resolution.bar_seconds(),
-                                ),
-                                last
-                                    .as_ref()
-                                    .and_then(|_| chart::last_candle_stroke_color(&candles, bar_secs)),
+                        let bar_secs_f = resolution.bar_seconds();
+                        let candles: Vec<Vec<f64>> = if let Some(p) = &last {
+                            chart::merge_history_with_live(
+                                &h.candles,
+                                p.price,
+                                p.t,
+                                bar_secs,
+                                forming_bar,
+                                sealed_last_row,
+                            )
+                        } else {
+                            chart::display_candles_without_live_tick(
+                                &h.candles,
+                                sealed_last_row,
+                                forming_bar,
+                                bar_secs,
                             )
                         };
+                        let (x_lo, x_hi) = chart::candle_row_time_range(&candles);
+                        // egui_plot: HLine не задаёт X в bounds(); явно растягиваем min/max по времени свечей.
+                        let x_pad = bar_secs_f * 0.6;
+                        let (box_plot, hline_stroke) = (
+                            chart::box_plot_from_history(&candles, bar_secs_f),
+                            last
+                                .as_ref()
+                                .and_then(|_| chart::last_candle_stroke_color(&candles, bar_secs)),
+                        );
                         if let Some(box_plot) = box_plot {
-                            let plot_response = Plot::new("ohlc_candles")
+                            let mut plot = Plot::new("ohlc_candles")
                                 // With no fixed height, Plot fills remaining CentralPanel space; price
                                 // axis and candle area stretch with the window. Y axis default
                                 // min_thickness ~14px can clip price labels. Labels align to the axis
@@ -463,7 +461,13 @@ impl ChainlinkApp {
                                 .allow_scroll(Vec2b {
                                     x: false,
                                     y: false,
-                                })
+                                });
+                            if let (Some(lo), Some(hi)) = (x_lo, x_hi) {
+                                plot = plot
+                                    .include_x((lo as f64) - x_pad)
+                                    .include_x((hi as f64) + x_pad);
+                            }
+                            let plot_response = plot
                                 .show(ui, |plot_ui| {
                                     plot_ui.add(box_plot);
                                     if let Some(p) = last.as_ref() {

@@ -7,6 +7,7 @@ use egui::Stroke;
 use egui_plot::{BoxElem, BoxPlot, BoxSpread};
 
 use crate::price::{decode_chainlink_price, encode_chainlink_price};
+use crate::unix_time::event_time_to_unix_sec;
 
 /// Начало интервала бара (сек), как `barTimeForTimestamp` в `candles.ts`.
 #[inline]
@@ -29,6 +30,25 @@ fn rightmost_in_highest_bar_bucket(candles: &[Vec<f64>], bar_s: i64) -> Option<u
         let r = &candles[i];
         r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_s) == key_max
     })
+}
+
+/// Диапазон сырых `t` по рядам (для `Plot::include_x` — у `HLine` в egui_plot нет вклада в X bounds).
+pub fn candle_row_time_range(rows: &[Vec<f64>]) -> (Option<i64>, Option<i64>) {
+    candle_time_extents(rows)
+}
+
+fn candle_time_extents(rows: &[Vec<f64>]) -> (Option<i64>, Option<i64>) {
+    let mut min: Option<i64> = None;
+    let mut max: Option<i64> = None;
+    for r in rows {
+        if r.len() < 5 {
+            continue;
+        }
+        let x = r[0] as i64;
+        min = Some(min.map_or(x, |m: i64| m.min(x)));
+        max = Some(max.map_or(x, |m: i64| m.max(x)));
+    }
+    (min, max)
 }
 
 /// Состояние «формирующейся» свечи, которой ещё нет в ответе API (новый тайм-слот).
@@ -62,6 +82,7 @@ pub fn merge_history_with_live(
     forming: &mut Option<FormingBarState>,
     sealed_last: &mut Option<SealedCandleRow>,
 ) -> Vec<Vec<f64>> {
+    let tick_t = event_time_to_unix_sec(tick_t);
     let bar = bar_time_for_timestamp(tick_t, bar_secs);
     let last_bar_t = max_aligned_bar_time(history, bar_secs).unwrap_or(i64::MIN);
 
@@ -379,5 +400,26 @@ mod tests {
             decode_chainlink_price(out[0][4])
         );
         assert!((decode_chainlink_price(out[1][4]) - 10.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_accepts_stream_time_in_millis_aligns_with_history_sec() {
+        // API — сек; стрим — мс (тот же момент). Без нормализации сравнение `bar` с историей ломается.
+        let t_last = 1_700_000_400i64;
+        let history = vec![row(1_700_000_100, 10.0, 11.0, 9.0, 10.0), row(t_last, 10.1, 10.2, 10.0, 10.15)];
+        let mut forming = None;
+        let mut sealed = None;
+        let bar_secs = 300;
+        let t_ms = t_last * 1000 + 50;
+        let out = merge_history_with_live(
+            &history,
+            10.22,
+            t_ms,
+            bar_secs,
+            &mut forming,
+            &mut sealed,
+        );
+        assert_eq!(out.len(), 2, "все ряды API на месте");
+        assert!((decode_chainlink_price(out[1][4]) - 10.22).abs() < 1e-6);
     }
 }

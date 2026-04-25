@@ -1,5 +1,20 @@
 //! Форматирование Unix-времени (ось графика = секунды с 1970-01-00 UTC) без внешних крейтов.
 
+/// BFF/история `from`/`to` и свечи — в **секундах**; стрим Chainlink нередко отдаёт `t` в **мс**.
+/// Сравнение `last_bar` из истории с `bar` по тику иначе «уезжает» на 3 порядка: новая свеча
+/// оказывается в другом пиксельном кластере, визуально остаётся «текущая».
+///
+/// Порог: в секундах до ~года 2286 значения < `10^10` — типичные Unix-sec; выше — считаем, что
+/// пришли миллисекунды (или совместимое крупное целое).
+pub fn event_time_to_unix_sec(t: i64) -> i64 {
+    const SUSPECT_MS: i64 = 10_000_000_000; // 1e10 s
+    if t >= SUSPECT_MS {
+        t / 1000
+    } else {
+        t
+    }
+}
+
 const MON3: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -100,5 +115,14 @@ mod tests {
             format_compact_utc(86_400),
             "1970-01-02  00:00:00 UTC"
         );
+    }
+
+    #[test]
+    fn ms_timestamps_map_to_sec() {
+        // ~2023-11 in sec vs same instant in ms
+        let sec: i64 = 1_700_000_000;
+        let ms: i64 = 1_700_000_000_000;
+        assert_eq!(event_time_to_unix_sec(sec), sec);
+        assert_eq!(event_time_to_unix_sec(ms), sec);
     }
 }

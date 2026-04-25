@@ -11,6 +11,7 @@ use tokio::time::sleep;
 
 use crate::json_chunks::feed_json_chunks;
 use crate::price::decode_chainlink_price;
+use crate::unix_time::event_time_to_unix_sec;
 
 #[derive(Clone, Default)]
 pub struct LastPrice {
@@ -140,6 +141,7 @@ pub async fn stream_loop(
                     let Some(t) = obj.get("t").and_then(time_field_as_i64) else {
                         continue;
                     };
+                    let t = event_time_to_unix_sec(t);
                     let price = decode_chainlink_price(p);
                     map.insert(
                         sym.to_string(),
