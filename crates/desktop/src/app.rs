@@ -11,7 +11,7 @@ use egui_plot::{GridMark, HLine, LineStyle, Plot, PlotPoint, PlotResponse, PlotU
 use reqwest::Client;
 
 use crate::assets::ASSET_LIST;
-use crate::chart;
+use crate::chart::{self, FormingBarState};
 use crate::bff::{self, HistoryRowsResponse};
 use crate::stream::{self, LastPrice, StreamUiStatus};
 use tokio::runtime::Handle;
@@ -183,6 +183,8 @@ pub enum Screen {
         api_symbol: String,
         resolution: Resolution,
         history: HistorySlot,
+        /// Аналог `previousFormingRef` в веб-клиенте: бакет, которого ещё нет в API.
+        forming_bar: Option<FormingBarState>,
     },
 }
 
@@ -276,6 +278,7 @@ impl ChainlinkApp {
             api_symbol,
             resolution,
             history,
+            forming_bar: None,
         };
     }
 
@@ -319,6 +322,7 @@ impl ChainlinkApp {
             api_symbol,
             resolution,
             history,
+            forming_bar,
         } = &mut self.screen
         {
             ui.horizontal(|ui| {
@@ -334,6 +338,7 @@ impl ChainlinkApp {
                 for (r, lbl) in [(Resolution::M5, "5m"), (Resolution::M15, "15m")] {
                     if ui.selectable_label(*resolution == r, lbl).clicked() && *resolution != r {
                         *resolution = r;
+                        *forming_bar = None;
                         history_refresh =
                             Some((api_symbol.clone(), r, history.clone()));
                     }
@@ -368,9 +373,16 @@ impl ChainlinkApp {
                     if h.candles.is_empty() {
                         ui.label("No candles for the selected period.");
                     } else {
+                        let bar_secs = resolution.bar_seconds() as i64;
                         let (box_plot, hline_stroke) = match &last {
                             Some(p) => {
-                                let candles = chart::candles_with_live_last(&h.candles, p.price);
+                                let candles = chart::merge_history_with_live(
+                                    &h.candles,
+                                    p.price,
+                                    p.t,
+                                    bar_secs,
+                                    forming_bar,
+                                );
                                 (
                                     chart::box_plot_from_history(
                                         &candles,
@@ -379,13 +391,16 @@ impl ChainlinkApp {
                                     chart::last_candle_stroke_color(&candles),
                                 )
                             }
-                            None => (
-                                chart::box_plot_from_history(
-                                    &h.candles,
-                                    resolution.bar_seconds(),
-                                ),
-                                None,
-                            ),
+                            None => {
+                                *forming_bar = None;
+                                (
+                                    chart::box_plot_from_history(
+                                        &h.candles,
+                                        resolution.bar_seconds(),
+                                    ),
+                                    None,
+                                )
+                            }
                         };
                         if let Some(box_plot) = box_plot {
                             let plot_response = Plot::new("ohlc_candles")

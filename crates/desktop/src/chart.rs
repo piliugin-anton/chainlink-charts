@@ -8,6 +8,81 @@ use egui_plot::{BoxElem, BoxPlot, BoxSpread};
 
 use crate::price::{decode_chainlink_price, encode_chainlink_price};
 
+/// Начало интервала бара (сек), как `barTimeForTimestamp` в `candles.ts`.
+#[inline]
+pub fn bar_time_for_timestamp(ts_sec: i64, bar_secs: i64) -> i64 {
+    (ts_sec / bar_secs) * bar_secs
+}
+
+fn max_candle_time(candles: &[Vec<f64>]) -> Option<i64> {
+    candles
+        .iter()
+        .filter_map(|row| (row.len() >= 5).then_some(row[0] as i64))
+        .max()
+}
+
+/// Состояние «формирующейся» свечи, которой ещё нет в ответе API (новый тайм-слот).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FormingBarState {
+    pub bar_t: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
+/// История + live-тик: обновление последней свечи API или добавление новой, если тик в следующем `bar`.
+///
+/// Пока бакет в ответе есть (`bar == last_t` в API), сбрасывает [`FormingBarState`]. Пока бакета нет
+/// (`bar > last_t`), копит OHLC в `forming` между кадрами, как `computeFormingBar` + ref в веб-клиенте.
+pub fn merge_history_with_live(
+    history: &[Vec<f64>],
+    price: f64,
+    tick_t: i64,
+    bar_secs: i64,
+    forming: &mut Option<FormingBarState>,
+) -> Vec<Vec<f64>> {
+    let bar = bar_time_for_timestamp(tick_t, bar_secs);
+    let last_t = max_candle_time(history).unwrap_or(i64::MIN);
+
+    if bar < last_t {
+        return history.to_vec();
+    }
+
+    if bar == last_t {
+        *forming = None;
+        return candles_with_live_last(history, price);
+    }
+
+    // `bar` > last_t — нового бакета в массиве API ещё нет
+    let f = match *forming {
+        Some(prev) if prev.bar_t == bar => FormingBarState {
+            bar_t: bar,
+            open: prev.open,
+            high: prev.high.max(price),
+            low: prev.low.min(price),
+            close: price,
+        },
+        _ => FormingBarState {
+            bar_t: bar,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+        },
+    };
+    *forming = Some(f);
+    let mut out = history.to_vec();
+    out.push(vec![
+        f.bar_t as f64,
+        encode_chainlink_price(f.open),
+        encode_chainlink_price(f.high),
+        encode_chainlink_price(f.low),
+        encode_chainlink_price(f.close),
+    ]);
+    out
+}
+
 /// Копия `candles` с обновлённой последней свечой (макс. `t`): close = `live`, high/low — расширяются.
 pub fn candles_with_live_last(candles: &[Vec<f64>], live: f64) -> Vec<Vec<f64>> {
     if candles.is_empty() {
@@ -156,4 +231,47 @@ pub fn box_plot_from_history(candles: &[Vec<f64>], bar_secs: f64) -> Option<BoxP
     }
 
     Some(BoxPlot::new(boxes).vertical().name("OHLC"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(t: i64, o: f64, h: f64, l: f64, c: f64) -> Vec<f64> {
+        vec![
+            t as f64,
+            encode_chainlink_price(o),
+            encode_chainlink_price(h),
+            encode_chainlink_price(l),
+            encode_chainlink_price(c),
+        ]
+    }
+
+    #[test]
+    fn merge_appends_new_bar_when_tick_in_next_bucket() {
+        let history = vec![row(1000, 10.0, 11.0, 9.0, 10.5)];
+        let mut forming = None;
+        // 5m bucket: 1000.. matches t=320 -> bar 0; use t in next bar after 1000+300=1300
+        let bar_secs = 300;
+        let out = merge_history_with_live(&history, 10.2, 1600, bar_secs, &mut forming);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1][0] as i64, 1500);
+        assert!(forming.is_some());
+    }
+
+    #[test]
+    fn merge_updates_last_row_when_tick_in_same_bucket_as_api() {
+        let history = vec![row(1500, 10.0, 11.0, 9.0, 10.5)];
+        let mut forming = Some(FormingBarState {
+            bar_t: 9999,
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+        });
+        let out = merge_history_with_live(&history, 10.8, 1600, 300, &mut forming);
+        assert_eq!(out.len(), 1);
+        assert!(forming.is_none());
+        assert!((decode_chainlink_price(out[0][4]) - 10.8).abs() < 1e-9);
+    }
 }
