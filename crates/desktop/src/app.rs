@@ -3,17 +3,22 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use egui::epaint::CornerRadiusF32;
 use egui::{
-    pos2, vec2, Color32, CursorIcon, FontId, LayerId, Order, PointerButton, Rect, Rounding, Shape,
-    Stroke, Vec2b,
+    pos2, vec2, Color32, CursorIcon, FontId, LayerId, Order, PointerButton, Rect, Shape, Stroke,
+    Vec2b,
 };
-use egui_plot::{GridMark, HLine, LineStyle, Plot, PlotPoint, PlotResponse, PlotUi};
+use egui_plot::{
+    Corner, CoordinatesFormatter, GridMark, HLine, LineStyle, Plot, PlotBounds, PlotPoint,
+    PlotResponse, PlotUi,
+};
 use reqwest::Client;
 
 use crate::assets::ASSET_LIST;
 use crate::chart::{self, FormingBarState, SealedCandleRow};
 use crate::bff::{self, HistoryRowsResponse};
 use crate::stream::{self, LastPrice, StreamUiStatus};
+use crate::unix_time;
 use tokio::runtime::Handle;
 
 fn unix_now_secs() -> i64 {
@@ -21,6 +26,13 @@ fn unix_now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Подписи сетки по X: плотность под масштаб (plot x = Unix-секунды UTC).
+fn format_plot_time_axis(mark: GridMark, range: &RangeInclusive<f64>) -> String {
+    let s = (mark.value.round() as i64).clamp(i64::MIN, i64::MAX);
+    let w = (range.end() - range.start()).max(1.0);
+    unix_time::format_axis_label_utc(s, w)
 }
 
 /// Must match `Plot::y_axis_min_width` (extra space for wide tick labels).
@@ -140,7 +152,7 @@ fn paint_current_price_y_axis_tag(
         [p1, p2],
         Stroke::new(1.0, line_color),
     ));
-    p.rect_filled(tag, Rounding::same(3.0), line_color);
+    p.rect_filled(tag, CornerRadiusF32::same(3.0), line_color);
     p.galley_with_override_text_color(
         pos2(
             tag.min.x + PRICE_TAG_PAD,
@@ -358,8 +370,9 @@ impl ChainlinkApp {
                 .cloned();
             if let Some(ref p) = last {
                 ui.label(format!(
-                    "Last price (stream): {:.6}  (t={})",
-                    p.price, p.t
+                    "Last price (stream): {:.6}   @ {}",
+                    p.price,
+                    unix_time::format_compact_utc(p.t)
                 ));
             } else {
                 ui.label("No tick for this symbol in the current stream (waiting…)");
@@ -379,35 +392,34 @@ impl ChainlinkApp {
                         ui.label("No candles for the selected period.");
                     } else {
                         let bar_secs = resolution.bar_seconds() as i64;
-                        let (box_plot, hline_stroke) = match &last {
-                            Some(p) => {
-                                let candles = chart::merge_history_with_live(
+                        let (box_plot, hline_stroke) = {
+                            let candles = if let Some(p) = &last {
+                                chart::merge_history_with_live(
                                     &h.candles,
                                     p.price,
                                     p.t,
                                     bar_secs,
                                     forming_bar,
                                     sealed_last_row,
-                                );
-                                (
-                                    chart::box_plot_from_history(
-                                        &candles,
-                                        resolution.bar_seconds(),
-                                    ),
-                                    chart::last_candle_stroke_color(&candles, bar_secs),
                                 )
-                            }
-                            None => {
-                                *forming_bar = None;
-                                *sealed_last_row = None;
-                                (
-                                    chart::box_plot_from_history(
-                                        &h.candles,
-                                        resolution.bar_seconds(),
-                                    ),
-                                    None,
+                            } else {
+                                // Без тика рисуем с тем же sealed/forming, иначе снова сырой REST.
+                                chart::display_candles_without_live_tick(
+                                    &h.candles,
+                                    sealed_last_row,
+                                    forming_bar,
+                                    bar_secs,
                                 )
-                            }
+                            };
+                            (
+                                chart::box_plot_from_history(
+                                    &candles,
+                                    resolution.bar_seconds(),
+                                ),
+                                last
+                                    .as_ref()
+                                    .and_then(|_| chart::last_candle_stroke_color(&candles, bar_secs)),
+                            )
                         };
                         if let Some(box_plot) = box_plot {
                             let plot_response = Plot::new("ohlc_candles")
@@ -417,10 +429,25 @@ impl ChainlinkApp {
                                 // strip; trailing spaces nudge the number left; Unicode em-spaces in
                                 // the formatter add gap before candles.
                                 .y_axis_min_width(CHART_Y_AXIS_MIN_WIDTH)
+                                .x_axis_formatter(format_plot_time_axis)
                                 .y_axis_formatter(
                                     |mark: GridMark, _range: &RangeInclusive<f64>| {
                                         format!("{:.2}   ", mark.value)
                                     },
+                                )
+                                // Подсказка при наведении: время UTC, не сырой timestamp по X
+                                .coordinates_formatter(
+                                    Corner::LeftBottom,
+                                    CoordinatesFormatter::new(
+                                        |value: &PlotPoint, _bounds: &PlotBounds| {
+                                            let t = value.x.round() as i64;
+                                            format!(
+                                                "{}  |  {:.2}",
+                                                unix_time::format_compact_utc(t),
+                                                value.y
+                                            )
+                                        },
+                                    ),
                                 )
                                 // Pan in time only; vertical drag on the main area does not shift Y (see price strip below).
                                 .allow_drag(Vec2b {
@@ -444,8 +471,7 @@ impl ChainlinkApp {
                                             Color32::from_rgb(100, 180, 255)
                                         });
                                         plot_ui.hline(
-                                            HLine::new(p.price)
-                                                .name("Current price")
+                                            HLine::new("Current price", p.price)
                                                 .color(col)
                                                 .width(1.0)
                                                 .style(LineStyle::dashed_loose()),
@@ -492,8 +518,8 @@ impl ChainlinkApp {
 }
 
 impl eframe::App for ChainlinkApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             match &self.screen {
                 Screen::List => self.ui_list(ui),
                 Screen::Detail { .. } => self.ui_detail(ui),

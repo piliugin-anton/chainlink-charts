@@ -120,6 +120,38 @@ pub fn merge_history_with_live(
     out
 }
 
+/// Пока нет live-тика: подставить `sealed` (последняя нарисованная свеча, совпадающая с `last` бакетом API) и, если есть, «замороженный» `forming` — иначе график падает на сырой REST, и «старая» свеча откатывается.
+pub fn display_candles_without_live_tick(
+    history: &[Vec<f64>],
+    sealed: &Option<SealedCandleRow>,
+    forming: &Option<FormingBarState>,
+    bar_secs: i64,
+) -> Vec<Vec<f64>> {
+    let last_bar_t = max_aligned_bar_time(history, bar_secs).unwrap_or(i64::MIN);
+    let mut out = history.to_vec();
+    if let Some((st, row)) = sealed {
+        if *st == last_bar_t {
+            if let Some(j) = out.iter().rposition(|r| {
+                r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == *st
+            }) {
+                out[j] = row.clone();
+            }
+        }
+    }
+    if let Some(f) = forming {
+        if f.bar_t > last_bar_t {
+            out.push(vec![
+                f.bar_t as f64,
+                encode_chainlink_price(f.open),
+                encode_chainlink_price(f.high),
+                encode_chainlink_price(f.low),
+                encode_chainlink_price(f.close),
+            ]);
+        }
+    }
+    out
+}
+
 /// Копия `candles` с обновлённой **последним по бакету** (как `barTimeForTimestamp`) свечой: close = `live`…
 pub fn candles_with_live_last(candles: &[Vec<f64>], live: f64, bar_s: i64) -> Vec<Vec<f64>> {
     if candles.is_empty() {
@@ -255,7 +287,7 @@ pub fn box_plot_from_history(candles: &[Vec<f64>], bar_secs: f64) -> Option<BoxP
         boxes.push(elem);
     }
 
-    Some(BoxPlot::new(boxes).vertical().name("OHLC"))
+    Some(BoxPlot::new("OHLC", boxes).vertical())
 }
 
 #[cfg(test)]
@@ -308,6 +340,28 @@ mod tests {
         assert!(forming.is_none());
         assert!((decode_chainlink_price(out[0][4]) - 10.8).abs() < 1e-9);
         assert_eq!(sealed.map(|(t, _)| t), Some(1500));
+    }
+
+    #[test]
+    fn display_without_tick_keeps_sealed_not_raw_rest() {
+        let history = vec![row(1500, 10.0, 11.0, 9.0, 9.0)];
+        let sealed = Some((
+            1500_i64,
+            {
+                let mut c = history[0].clone();
+                c[4] = encode_chainlink_price(10.5);
+                c[2] = encode_chainlink_price(11.0);
+                c[3] = encode_chainlink_price(9.0);
+                c
+            },
+        ));
+        let out = display_candles_without_live_tick(
+            &history,
+            &sealed,
+            &None,
+            300,
+        );
+        assert!((decode_chainlink_price(out[0][4]) - 10.5).abs() < 1e-9);
     }
 
     #[test]

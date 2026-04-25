@@ -9,6 +9,7 @@ mod chart;
 mod json_chunks;
 mod price;
 mod stream;
+mod unix_time;
 
 fn main() -> eframe::Result<()> {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
