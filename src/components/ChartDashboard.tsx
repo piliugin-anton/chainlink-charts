@@ -2,12 +2,14 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CandlestickData } from "lightweight-charts";
 
 import { usePriceStream } from "@/hooks/usePriceStream";
 import { coerceResolutionForWindow } from "@/lib/chainlink/resolution";
 import {
   type HistoryRowsResponse,
   mapHistoryToChartData,
+  normalizeCandleForDisplay,
 } from "@/lib/chainlink/candles";
 import { computeFormingBar } from "@/lib/chainlink/liveBar";
 import { ASSET_LIST, type AssetKey, API_SYMBOLS } from "@/lib/chainlink/constants";
@@ -88,6 +90,7 @@ export function ChartDashboard() {
     refetchInterval: 60_000,
   });
 
+  /** Raw API OHLC; used for live merge so open/close are not display-artifacts. */
   const chartData = useMemo(
     () =>
       historyQuery.data
@@ -96,12 +99,34 @@ export function ChartDashboard() {
     [historyQuery.data]
   );
 
+  const chartDataForView = useMemo(
+    () => chartData.map(normalizeCandleForDisplay),
+    [chartData]
+  );
+
   const lastTick = prices[apiSymbol];
 
-  const liveBar = useMemo(
-    () => computeFormingBar(chartData, lastTick, coercedResolution),
-    [chartData, lastTick, coercedResolution]
-  );
+  /** Raw forming bar for buckets not in API yet (accumulate ticks; see computeFormingBar). */
+  const previousFormingRef = useRef<CandlestickData | null>(null);
+
+  useEffect(() => {
+    previousFormingRef.current = null;
+  }, [apiSymbol, coercedResolution, rangeId]);
+
+  const liveBar = useMemo(() => {
+    const raw = computeFormingBar(
+      chartData,
+      lastTick,
+      coercedResolution,
+      previousFormingRef.current
+    );
+    if (raw) {
+      previousFormingRef.current = raw;
+    } else if (lastTick) {
+      previousFormingRef.current = null;
+    }
+    return raw ? normalizeCandleForDisplay(raw) : null;
+  }, [chartData, lastTick, coercedResolution]);
 
   const unconfigured = status === "unconfigured";
   const streamLabel =
@@ -244,7 +269,7 @@ export function ChartDashboard() {
             <p className="text-xs">Try a coarser resolution or a wider range.</p>
           </div>
         ) : (
-          <PriceChart data={chartData} liveBar={liveBar} />
+          <PriceChart data={chartDataForView} liveBar={liveBar} />
         )}
       </div>
     </div>

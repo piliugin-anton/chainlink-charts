@@ -61,10 +61,10 @@ export function mapHistoryToChartData(
     close: decodeChainlinkPrice(c[4]),
   }));
   out.sort((a, b) => Number(a.time) - Number(b.time));
-  // Deduplicate by time (keeps last)
+  // Deduplicate by time (keeps last). Raw OHLC only — do not mix display nudges with merge logic.
   const byT = new Map<number, CandlestickData>();
   for (const c of out) {
-    byT.set(Number(c.time), normalizeCandleForDisplay(c));
+    byT.set(Number(c.time), c);
   }
   return [...byT.values()].sort((a, b) => Number(a.time) - Number(b.time));
 }
