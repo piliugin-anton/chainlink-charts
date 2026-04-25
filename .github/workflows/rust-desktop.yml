@@ -1,0 +1,24 @@
+name: Rust desktop
+
+on:
+  push:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/desktop/**"
+      - ".github/workflows/rust-desktop.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/desktop/**"
+      - ".github/workflows/rust-desktop.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p chainlink-charts-desktop --locked
+      - run: cargo test -p chainlink-charts-desktop --locked
