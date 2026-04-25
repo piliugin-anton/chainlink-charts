@@ -31,16 +31,26 @@ pub struct FormingBarState {
     pub close: f64,
 }
 
+/// Последняя нарисованная строка OHLC для `bar_t` (сырой вектор как в `history`, для `sealed` в
+/// [`merge_history_with_live`]).
+pub type SealedCandleRow = (i64, Vec<f64>);
+
 /// История + live-тик: обновление последней свечи API или добавление новой, если тик в следующем `bar`.
 ///
 /// Пока бакет в ответе есть (`bar == last_t` в API), сбрасывает [`FormingBarState`]. Пока бакета нет
 /// (`bar > last_t`), копит OHLC в `forming` между кадрами, как `computeFormingBar` + ref в веб-клиенте.
+///
+/// `sealed_last` — копия **последнего** merged-ряда, пока тик в текущем бакете (при `bar==last_t`).
+/// При `bar>last_t` она **подставляется** вместо последней строки `history` (её time совпадает с
+/// `max` по API), чтобы «закрывшаяся» свеча не откатывалась к устаревшему REST и не визуально
+/// скачивалась.
 pub fn merge_history_with_live(
     history: &[Vec<f64>],
     price: f64,
     tick_t: i64,
     bar_secs: i64,
     forming: &mut Option<FormingBarState>,
+    sealed_last: &mut Option<SealedCandleRow>,
 ) -> Vec<Vec<f64>> {
     let bar = bar_time_for_timestamp(tick_t, bar_secs);
     let last_t = max_candle_time(history).unwrap_or(i64::MIN);
@@ -51,10 +61,27 @@ pub fn merge_history_with_live(
 
     if bar == last_t {
         *forming = None;
-        return candles_with_live_last(history, price);
+        let out = candles_with_live_last(history, price);
+        if let Some(idx) = last_candle_row_index(&out) {
+            *sealed_last = Some((out[idx][0] as i64, out[idx].clone()));
+        } else {
+            *sealed_last = None;
+        }
+        return out;
     }
 
-    // `bar` > last_t — нового бакета в массиве API ещё нет
+    // `bar` > last_t — нового бакета в массиве API ещё нет: зафиксировать закрытие прошлого бара.
+    let mut out = history.to_vec();
+    if let Some((st, row)) = sealed_last.as_ref() {
+        if *st == last_t {
+            if let Some(idx) = last_candle_row_index(&out) {
+                if (out[idx][0] as i64) == last_t {
+                    out[idx] = row.clone();
+                }
+            }
+        }
+    }
+
     let f = match *forming {
         Some(prev) if prev.bar_t == bar => FormingBarState {
             bar_t: bar,
@@ -72,7 +99,6 @@ pub fn merge_history_with_live(
         },
     };
     *forming = Some(f);
-    let mut out = history.to_vec();
     out.push(vec![
         f.bar_t as f64,
         encode_chainlink_price(f.open),
@@ -251,9 +277,17 @@ mod tests {
     fn merge_appends_new_bar_when_tick_in_next_bucket() {
         let history = vec![row(1000, 10.0, 11.0, 9.0, 10.5)];
         let mut forming = None;
-        // 5m bucket: 1000.. matches t=320 -> bar 0; use t in next bar after 1000+300=1300
+        let mut sealed = None;
+        // 5m bucket: last_t=1000; t=1600 -> bar=1500 > 1000
         let bar_secs = 300;
-        let out = merge_history_with_live(&history, 10.2, 1600, bar_secs, &mut forming);
+        let out = merge_history_with_live(
+            &history,
+            10.2,
+            1600,
+            bar_secs,
+            &mut forming,
+            &mut sealed,
+        );
         assert_eq!(out.len(), 2);
         assert_eq!(out[1][0] as i64, 1500);
         assert!(forming.is_some());
@@ -269,9 +303,28 @@ mod tests {
             low: 1.0,
             close: 1.0,
         });
-        let out = merge_history_with_live(&history, 10.8, 1600, 300, &mut forming);
+        let mut sealed = None;
+        let out = merge_history_with_live(&history, 10.8, 1600, 300, &mut forming, &mut sealed);
         assert_eq!(out.len(), 1);
         assert!(forming.is_none());
         assert!((decode_chainlink_price(out[0][4]) - 10.8).abs() < 1e-9);
+        assert_eq!(sealed.map(|(t, _)| t), Some(1500));
+    }
+
+    #[test]
+    fn merge_uses_sealed_for_previous_bar_when_new_bucket_appends() {
+        // REST ещё с last close=9, live дорисовывает до 10.5, затем новый бакет
+        let history = vec![row(1500, 10.0, 11.0, 9.0, 9.0)];
+        let mut sealed = None;
+        let mut forming = None;
+        merge_history_with_live(&history, 10.5, 1600, 300, &mut forming, &mut sealed);
+        let out = merge_history_with_live(&history, 10.1, 1900, 300, &mut forming, &mut sealed);
+        assert_eq!(out.len(), 2);
+        assert!(
+            (decode_chainlink_price(out[0][4]) - 10.5).abs() < 1e-6,
+            "квант REST не откатывает закрытие: {}",
+            decode_chainlink_price(out[0][4])
+        );
+        assert!((decode_chainlink_price(out[1][4]) - 10.1).abs() < 1e-9);
     }
 }

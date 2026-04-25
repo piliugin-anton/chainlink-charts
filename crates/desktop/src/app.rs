@@ -11,7 +11,7 @@ use egui_plot::{GridMark, HLine, LineStyle, Plot, PlotPoint, PlotResponse, PlotU
 use reqwest::Client;
 
 use crate::assets::ASSET_LIST;
-use crate::chart::{self, FormingBarState};
+use crate::chart::{self, FormingBarState, SealedCandleRow};
 use crate::bff::{self, HistoryRowsResponse};
 use crate::stream::{self, LastPrice, StreamUiStatus};
 use tokio::runtime::Handle;
@@ -185,6 +185,8 @@ pub enum Screen {
         history: HistorySlot,
         /// Аналог `previousFormingRef` в веб-клиенте: бакет, которого ещё нет в API.
         forming_bar: Option<FormingBarState>,
+        /// Последний merged-ряд при тике в последнем бакете API — подставляется при открытии нового бара.
+        sealed_last_row: Option<SealedCandleRow>,
     },
 }
 
@@ -279,6 +281,7 @@ impl ChainlinkApp {
             resolution,
             history,
             forming_bar: None,
+            sealed_last_row: None,
         };
     }
 
@@ -323,6 +326,7 @@ impl ChainlinkApp {
             resolution,
             history,
             forming_bar,
+            sealed_last_row,
         } = &mut self.screen
         {
             ui.horizontal(|ui| {
@@ -339,6 +343,7 @@ impl ChainlinkApp {
                     if ui.selectable_label(*resolution == r, lbl).clicked() && *resolution != r {
                         *resolution = r;
                         *forming_bar = None;
+                        *sealed_last_row = None;
                         history_refresh =
                             Some((api_symbol.clone(), r, history.clone()));
                     }
@@ -382,6 +387,7 @@ impl ChainlinkApp {
                                     p.t,
                                     bar_secs,
                                     forming_bar,
+                                    sealed_last_row,
                                 );
                                 (
                                     chart::box_plot_from_history(
@@ -393,6 +399,7 @@ impl ChainlinkApp {
                             }
                             None => {
                                 *forming_bar = None;
+                                *sealed_last_row = None;
                                 (
                                     chart::box_plot_from_history(
                                         &h.candles,
@@ -470,6 +477,15 @@ impl ChainlinkApp {
             self.screen = Screen::List;
         }
         if let Some((sym, r, slot)) = history_refresh {
+            if let Screen::Detail {
+                forming_bar,
+                sealed_last_row,
+                ..
+            } = &mut self.screen
+            {
+                *forming_bar = None;
+                *sealed_last_row = None;
+            }
             self.schedule_history_fetch(sym, r, slot);
         }
     }
