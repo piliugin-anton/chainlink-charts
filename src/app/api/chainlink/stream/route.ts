@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getAccessToken } from "@/lib/chainlink/auth";
 import { STREAMING_SYMBOLS_PARAM } from "@/lib/chainlink/constants";
 import { getChainlinkConfig, isChainlinkConfigured } from "@/lib/chainlink/env";
+import { getProcessShutdownSignal } from "@/lib/process-shutdown-signal";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,8 +24,10 @@ export async function GET(request: Request) {
     q.set("symbol", STREAMING_SYMBOLS_PARAM);
     const url = `${baseUrl}/api/v1/streaming?${q.toString()}`;
 
+    const mergedSignal = AbortSignal.any([request.signal, getProcessShutdownSignal()]);
+
     const upstream = await fetch(url, {
-      signal: request.signal,
+      signal: mergedSignal,
       headers: {
         Authorization: `Bearer ${token}`,
         Connection: "keep-alive",
