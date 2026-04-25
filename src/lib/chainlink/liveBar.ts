@@ -1,6 +1,6 @@
 import type { CandlestickData, UTCTimestamp } from "lightweight-charts";
 
-import { barTimeForTimestamp } from "./candles";
+import { barTimeForTimestamp, normalizeCandleForDisplay } from "./candles";
 
 /**
  * Forming bar from the latest tick, merged with the last historical candle when times match.
@@ -19,24 +19,24 @@ export function computeFormingBar(
   const last = historyAsc[historyAsc.length - 1];
 
   if (!last) {
-    return { time: barT, open: p, high: p, low: p, close: p };
+    return normalizeCandleForDisplay({ time: barT, open: p, high: p, low: p, close: p });
   }
 
   const lastT = Number(last.time);
 
   if (bar > lastT) {
-    return { time: barT, open: p, high: p, low: p, close: p };
+    return normalizeCandleForDisplay({ time: barT, open: p, high: p, low: p, close: p });
   }
 
   if (bar < lastT) {
     return null;
   }
 
-  return {
+  return normalizeCandleForDisplay({
     time: barT,
     open: last.open,
     high: Math.max(last.high, p),
     low: Math.min(last.low, p),
     close: p,
-  };
+  });
 }
