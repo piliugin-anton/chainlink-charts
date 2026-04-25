@@ -170,10 +170,10 @@ export function ChartDashboard() {
               </div>
               <div className="mt-1 font-mono text-lg text-zinc-100">
                 {tick
-                  ? tick.price.toLocaleString("en-US", {
+                  ? <>$ {tick.price.toLocaleString("en-US", {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
-                    })
+                    })}</>
                   : "—"}
               </div>
             </button>
