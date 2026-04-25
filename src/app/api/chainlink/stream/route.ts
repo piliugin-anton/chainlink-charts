@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-export async function GET() {
+export async function GET(request: Request) {
   if (!isChainlinkConfigured()) {
     return NextResponse.json(
       { error: "Server is not configured for Chainlink (missing env vars)." },
@@ -24,6 +24,7 @@ export async function GET() {
     const url = `${baseUrl}/api/v1/streaming?${q.toString()}`;
 
     const upstream = await fetch(url, {
+      signal: request.signal,
       headers: {
         Authorization: `Bearer ${token}`,
         Connection: "keep-alive",
@@ -58,6 +59,9 @@ export async function GET() {
       },
     });
   } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      return new NextResponse(null, { status: 204 });
+    }
     console.error("[stream]", e);
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "Stream error" },
