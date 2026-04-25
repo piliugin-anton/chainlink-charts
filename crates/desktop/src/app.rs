@@ -59,6 +59,39 @@ fn apply_price_scale_y_zoom(plot_ui: &mut PlotUi) {
     plot_ui.zoom_bounds(egui::vec2(1.0, s), center);
 }
 
+/// Map mouse / trackpad scroll to **horizontal (time) zoom** only. Default `egui_plot` scroll pans;
+/// we turn that off with `allow_scroll(false)` and apply X zoom here (see `allow_zoom` for pinch/Ctrl+wheel).
+fn apply_time_axis_scroll_zoom(plot_ui: &mut PlotUi) {
+    let d = plot_ui
+        .ctx()
+        .input(|i| i.smooth_scroll_delta);
+    if d == egui::Vec2::ZERO {
+        return;
+    }
+    let pr = plot_ui.response().rect;
+    let mut hit = pr;
+    // Include the y-axis label column so scroll works over prices too
+    hit.min.x -= CHART_Y_AXIS_MIN_WIDTH + PRICE_SCALE_LABEL_PAD;
+    let Some(pos) = plot_ui.ctx().input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    if !hit.contains(pos) {
+        return;
+    }
+    // wheel / trackpad: use vertical scroll mainly; add horizontal for trackpads
+    let scroll = d.y + 0.3 * d.x;
+    if scroll == 0.0 {
+        return;
+    }
+    // zoom_factor > 1 zooms in on the axis in plot space = narrower time range
+    // Down-scroll (typ. +y) → zoom out (see more time) — sign inverted vs default feel
+    let s = (1.0 + 0.0008 * scroll).clamp(0.92, 1.08);
+    if (s - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    plot_ui.zoom_bounds_around_hovered(egui::vec2(s, 1.0));
+}
+
 const PRICE_TAG_PAD: f32 = 5.0;
 const PRICE_TAG_GAP: f32 = 4.0;
 
@@ -372,8 +405,16 @@ impl ChainlinkApp {
                                     x: true,
                                     y: false,
                                 })
-                                .allow_zoom(true)
-                                .allow_scroll(true)
+                                // Pinch / Ctrl+wheel: time axis only; Y scale uses the price column drag.
+                                .allow_zoom(Vec2b {
+                                    x: true,
+                                    y: false,
+                                })
+                                // Replaced with `apply_time_axis_scroll_zoom` (X zoom) instead of pan.
+                                .allow_scroll(Vec2b {
+                                    x: false,
+                                    y: false,
+                                })
                                 .show(ui, |plot_ui| {
                                     plot_ui.add(box_plot);
                                     if let Some(p) = last.as_ref() {
@@ -388,6 +429,7 @@ impl ChainlinkApp {
                                                 .style(LineStyle::dashed_loose()),
                                         );
                                     }
+                                    apply_time_axis_scroll_zoom(plot_ui);
                                     apply_price_scale_y_zoom(plot_ui);
                                 });
                             if let Some(p) = last.as_ref() {
