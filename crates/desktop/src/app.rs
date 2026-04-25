@@ -138,7 +138,7 @@ fn paint_current_price_y_axis_tag(
     p.set_clip_rect(ui.clip_rect());
     p.add(Shape::line_segment(
         [p1, p2],
-        Stroke::new(1.5, line_color),
+        Stroke::new(1.0, line_color),
     ));
     p.rect_filled(tag, Rounding::same(3.0), line_color);
     p.galley_with_override_text_color(
@@ -440,7 +440,7 @@ impl ChainlinkApp {
                                             HLine::new(p.price)
                                                 .name("Current price")
                                                 .color(col)
-                                                .width(1.5)
+                                                .width(1.0)
                                                 .style(LineStyle::dashed_loose()),
                                         );
                                     }
