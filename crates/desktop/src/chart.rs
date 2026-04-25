@@ -14,11 +14,21 @@ pub fn bar_time_for_timestamp(ts_sec: i64, bar_secs: i64) -> i64 {
     (ts_sec / bar_secs) * bar_secs
 }
 
-fn max_candle_time(candles: &[Vec<f64>]) -> Option<i64> {
+/// Макс. `bar_time_for_timestamp` по рядам — согласовано с `box_plot_from_history` и с логикой merge.
+fn max_aligned_bar_time(candles: &[Vec<f64>], bar_s: i64) -> Option<i64> {
     candles
         .iter()
-        .filter_map(|row| (row.len() >= 5).then_some(row[0] as i64))
+        .filter_map(|row| (row.len() >= 5).then_some(bar_time_for_timestamp(row[0] as i64, bar_s)))
         .max()
+}
+
+/// Правая свеча в **самом правом** тайм-бакете (как на графике после `box_plot` с ключом по `bar_t`).
+fn rightmost_in_highest_bar_bucket(candles: &[Vec<f64>], bar_s: i64) -> Option<usize> {
+    let key_max = max_aligned_bar_time(candles, bar_s)?;
+    (0..candles.len()).rev().find(|&i| {
+        let r = &candles[i];
+        r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_s) == key_max
+    })
 }
 
 /// Состояние «формирующейся» свечи, которой ещё нет в ответе API (новый тайм-слот).
@@ -53,31 +63,32 @@ pub fn merge_history_with_live(
     sealed_last: &mut Option<SealedCandleRow>,
 ) -> Vec<Vec<f64>> {
     let bar = bar_time_for_timestamp(tick_t, bar_secs);
-    let last_t = max_candle_time(history).unwrap_or(i64::MIN);
+    let last_bar_t = max_aligned_bar_time(history, bar_secs).unwrap_or(i64::MIN);
 
-    if bar < last_t {
+    if bar < last_bar_t {
         return history.to_vec();
     }
 
-    if bar == last_t {
+    if bar == last_bar_t {
         *forming = None;
-        let out = candles_with_live_last(history, price);
-        if let Some(idx) = last_candle_row_index(&out) {
-            *sealed_last = Some((out[idx][0] as i64, out[idx].clone()));
+        let out = candles_with_live_last(history, price, bar_secs);
+        if let Some(idx) = rightmost_in_highest_bar_bucket(&out, bar_secs) {
+            let t_key = bar_time_for_timestamp(out[idx][0] as i64, bar_secs);
+            *sealed_last = Some((t_key, out[idx].clone()));
         } else {
             *sealed_last = None;
         }
         return out;
     }
 
-    // `bar` > last_t — нового бакета в массиве API ещё нет: зафиксировать закрытие прошлого бара.
+    // `bar` > `last_bar_t` — в ответе API нет бакета под текущий тик: зафиксировать закрытие прошлого.
     let mut out = history.to_vec();
     if let Some((st, row)) = sealed_last.as_ref() {
-        if *st == last_t {
-            if let Some(idx) = last_candle_row_index(&out) {
-                if (out[idx][0] as i64) == last_t {
-                    out[idx] = row.clone();
-                }
+        if *st == last_bar_t {
+            if let Some(j) = out.iter().rposition(|r| {
+                r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == *st
+            }) {
+                out[j] = row.clone();
             }
         }
     }
@@ -109,12 +120,12 @@ pub fn merge_history_with_live(
     out
 }
 
-/// Копия `candles` с обновлённой последней свечой (макс. `t`): close = `live`, high/low — расширяются.
-pub fn candles_with_live_last(candles: &[Vec<f64>], live: f64) -> Vec<Vec<f64>> {
+/// Копия `candles` с обновлённой **последним по бакету** (как `barTimeForTimestamp`) свечой: close = `live`…
+pub fn candles_with_live_last(candles: &[Vec<f64>], live: f64, bar_s: i64) -> Vec<Vec<f64>> {
     if candles.is_empty() {
         return vec![];
     }
-    let Some(idx) = last_candle_row_index(candles) else {
+    let Some(idx) = rightmost_in_highest_bar_bucket(candles, bar_s) else {
         return candles.to_vec();
     };
 
@@ -133,9 +144,9 @@ pub fn candles_with_live_last(candles: &[Vec<f64>], live: f64) -> Vec<Vec<f64>> 
     out
 }
 
-/// `stroke` той же свечи, что рисуется справа (макс. `t`), с тем же `normalize_ohlc_display` что и `box_plot_from_history`.
-pub fn last_candle_stroke_color(candles: &[Vec<f64>]) -> Option<Color32> {
-    let idx = last_candle_row_index(candles)?;
+/// `stroke` той же свечи, что справа: самый новый `bar` на оси (как в `box_plot_from_history`).
+pub fn last_candle_stroke_color(candles: &[Vec<f64>], bar_s: i64) -> Option<Color32> {
+    let idx = rightmost_in_highest_bar_bucket(candles, bar_s)?;
     let row = &candles[idx];
     if row.len() < 5 {
         return None;
@@ -151,21 +162,6 @@ pub fn last_candle_stroke_color(candles: &[Vec<f64>]) -> Option<Color32> {
     } else {
         Color32::from_rgb(200, 64, 64)
     })
-}
-
-fn last_candle_row_index(candles: &[Vec<f64>]) -> Option<usize> {
-    let (idx, _) = candles
-        .iter()
-        .enumerate()
-        .filter_map(|(i, row)| {
-            if row.len() >= 5 {
-                Some((i, row[0] as i64))
-            } else {
-                None
-            }
-        })
-        .max_by_key(|(_, t)| *t)?;
-    Some(idx)
 }
 
 #[inline]
@@ -208,13 +204,16 @@ fn normalize_ohlc_display(open: f64, high: f64, low: f64, close: f64) -> (f64, f
 
 /// `bar_secs` — длина бара в секундах (300 для 5m, 900 для 15m) для ширины тела на оси времени.
 pub fn box_plot_from_history(candles: &[Vec<f64>], bar_secs: f64) -> Option<BoxPlot> {
+    let bar_s = bar_secs as i64;
+    // Ключ = начало бакета, как в `barTimeForTimestamp` — иначе два t в одном интервале из-за
+    // f64/JSON съезжают в разные i64 и в HashMap «теряется» свеча; соседние сливались в один x.
     let mut by_t: HashMap<i64, (f64, f64, f64, f64)> = HashMap::new();
 
     for row in candles {
         if row.len() < 5 {
             continue;
         }
-        let t = row[0] as i64;
+        let t = bar_time_for_timestamp(row[0] as i64, bar_s);
         let o = decode_chainlink_price(row[1]);
         let h = decode_chainlink_price(row[2]);
         let l = decode_chainlink_price(row[3]);

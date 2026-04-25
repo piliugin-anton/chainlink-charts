@@ -394,7 +394,7 @@ impl ChainlinkApp {
                                         &candles,
                                         resolution.bar_seconds(),
                                     ),
-                                    chart::last_candle_stroke_color(&candles),
+                                    chart::last_candle_stroke_color(&candles, bar_secs),
                                 )
                             }
                             None => {
