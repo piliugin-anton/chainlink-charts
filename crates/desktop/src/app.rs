@@ -199,6 +199,8 @@ pub enum Screen {
         forming_bar: Option<FormingBarState>,
         /// Последний merged-ряд при тике в последнем бакете API — подставляется при открытии нового бара.
         sealed_last_row: Option<SealedCandleRow>,
+        /// Завершённые live-свечи (перешли из forming при смене бакета), ещё не подтверждённые REST.
+        live_bars: Vec<FormingBarState>,
     },
 }
 
@@ -294,6 +296,7 @@ impl ChainlinkApp {
             history,
             forming_bar: None,
             sealed_last_row: None,
+            live_bars: Vec::new(),
         };
     }
 
@@ -339,6 +342,7 @@ impl ChainlinkApp {
             history,
             forming_bar,
             sealed_last_row,
+            live_bars,
         } = &mut self.screen
         {
             ui.horizontal(|ui| {
@@ -356,6 +360,7 @@ impl ChainlinkApp {
                         *resolution = r;
                         *forming_bar = None;
                         *sealed_last_row = None;
+                        live_bars.clear();
                         history_refresh =
                             Some((api_symbol.clone(), r, history.clone()));
                     }
@@ -401,6 +406,7 @@ impl ChainlinkApp {
                                 bar_secs,
                                 forming_bar,
                                 sealed_last_row,
+                                live_bars,
                             )
                         } else {
                             chart::display_candles_without_live_tick(
@@ -408,6 +414,7 @@ impl ChainlinkApp {
                                 sealed_last_row,
                                 forming_bar,
                                 bar_secs,
+                                live_bars,
                             )
                         };
                         let (x_lo, x_hi) = chart::candle_row_time_range(&candles);
@@ -510,11 +517,13 @@ impl ChainlinkApp {
             if let Screen::Detail {
                 forming_bar,
                 sealed_last_row,
+                live_bars,
                 ..
             } = &mut self.screen
             {
                 *forming_bar = None;
                 *sealed_last_row = None;
+                live_bars.clear();
             }
             self.schedule_history_fetch(sym, r, slot);
         }

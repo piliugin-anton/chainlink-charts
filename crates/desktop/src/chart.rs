@@ -65,6 +65,25 @@ pub struct FormingBarState {
 /// [`merge_history_with_live`]).
 pub type SealedCandleRow = (i64, Vec<f64>);
 
+fn forming_bar_to_row(f: FormingBarState) -> Vec<f64> {
+    vec![
+        f.bar_t as f64,
+        encode_chainlink_price(f.open),
+        encode_chainlink_price(f.high),
+        encode_chainlink_price(f.low),
+        encode_chainlink_price(f.close),
+    ]
+}
+
+/// Вставляет все `live_bars` в `out` отсортированными по `bar_t`.
+fn append_live_bars_sorted(out: &mut Vec<Vec<f64>>, live_bars: &[FormingBarState]) {
+    let mut sorted: Vec<&FormingBarState> = live_bars.iter().collect();
+    sorted.sort_unstable_by_key(|fb| fb.bar_t);
+    for fb in sorted {
+        out.push(forming_bar_to_row(*fb));
+    }
+}
+
 /// История + live-тик: обновление последней свечи API или добавление новой, если тик в следующем `bar`.
 ///
 /// Пока бакет в ответе есть (`bar == last_t` в API), сбрасывает [`FormingBarState`]. Пока бакета нет
@@ -74,6 +93,9 @@ pub type SealedCandleRow = (i64, Vec<f64>);
 /// При `bar>last_t` она **подставляется** вместо последней строки `history` (её time совпадает с
 /// `max` по API), чтобы «закрывшаяся» свеча не откатывалась к устаревшему REST и не визуально
 /// скачивалась.
+///
+/// `live_bars` — завершённые live-свечи, ещё не подтверждённые REST. При переходе `forming` в новый
+/// бакет старый бар переходит сюда. Очищаются когда REST их догоняет.
 pub fn merge_history_with_live(
     history: &[Vec<f64>],
     price: f64,
@@ -81,10 +103,18 @@ pub fn merge_history_with_live(
     bar_secs: i64,
     forming: &mut Option<FormingBarState>,
     sealed_last: &mut Option<SealedCandleRow>,
+    live_bars: &mut Vec<FormingBarState>,
 ) -> Vec<Vec<f64>> {
     let tick_t = event_time_to_unix_sec(tick_t);
     let bar = bar_time_for_timestamp(tick_t, bar_secs);
     let last_bar_t = max_aligned_bar_time(history, bar_secs).unwrap_or(i64::MIN);
+
+    // Remove live bars that REST has now confirmed.
+    live_bars.retain(|fb| {
+        !history.iter().any(|r| {
+            r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == fb.bar_t
+        })
+    });
 
     if bar < last_bar_t {
         return history.to_vec();
@@ -92,17 +122,26 @@ pub fn merge_history_with_live(
 
     if bar == last_bar_t {
         *forming = None;
-        let out = candles_with_live_last(history, price, bar_secs);
-        if let Some(idx) = rightmost_in_highest_bar_bucket(&out, bar_secs) {
-            let t_key = bar_time_for_timestamp(out[idx][0] as i64, bar_secs);
-            *sealed_last = Some((t_key, out[idx].clone()));
+        let rest_out = candles_with_live_last(history, price, bar_secs);
+        // sealed_last captures the live close of the last REST bar for use when a new bucket opens.
+        if let Some(idx) = rightmost_in_highest_bar_bucket(&rest_out, bar_secs) {
+            let t_key = bar_time_for_timestamp(rest_out[idx][0] as i64, bar_secs);
+            *sealed_last = Some((t_key, rest_out[idx].clone()));
         } else {
             *sealed_last = None;
         }
+        let mut out = rest_out;
+        append_live_bars_sorted(&mut out, live_bars);
         return out;
     }
 
-    // `bar` > `last_bar_t` — в ответе API нет бакета под текущий тик: зафиксировать закрытие прошлого.
+    // bar > last_bar_t: graduate the previous forming bar into live_bars when entering a new bucket.
+    if let Some(prev) = *forming {
+        if prev.bar_t != bar && !live_bars.iter().any(|fb| fb.bar_t == prev.bar_t) {
+            live_bars.push(prev);
+        }
+    }
+
     let mut out = history.to_vec();
     if let Some((st, row)) = sealed_last.as_ref() {
         if *st == last_bar_t {
@@ -113,6 +152,8 @@ pub fn merge_history_with_live(
             }
         }
     }
+
+    append_live_bars_sorted(&mut out, live_bars);
 
     let f = match *forming {
         Some(prev) if prev.bar_t == bar => FormingBarState {
@@ -131,13 +172,7 @@ pub fn merge_history_with_live(
         },
     };
     *forming = Some(f);
-    out.push(vec![
-        f.bar_t as f64,
-        encode_chainlink_price(f.open),
-        encode_chainlink_price(f.high),
-        encode_chainlink_price(f.low),
-        encode_chainlink_price(f.close),
-    ]);
+    out.push(forming_bar_to_row(f));
     out
 }
 
@@ -147,6 +182,7 @@ pub fn display_candles_without_live_tick(
     sealed: &Option<SealedCandleRow>,
     forming: &Option<FormingBarState>,
     bar_secs: i64,
+    live_bars: &[FormingBarState],
 ) -> Vec<Vec<f64>> {
     let last_bar_t = max_aligned_bar_time(history, bar_secs).unwrap_or(i64::MIN);
     let mut out = history.to_vec();
@@ -159,15 +195,21 @@ pub fn display_candles_without_live_tick(
             }
         }
     }
+    let mut sorted_live: Vec<&FormingBarState> = live_bars
+        .iter()
+        .filter(|fb| {
+            !history.iter().any(|r| {
+                r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == fb.bar_t
+            })
+        })
+        .collect();
+    sorted_live.sort_unstable_by_key(|fb| fb.bar_t);
+    for fb in sorted_live {
+        out.push(forming_bar_to_row(*fb));
+    }
     if let Some(f) = forming {
         if f.bar_t > last_bar_t {
-            out.push(vec![
-                f.bar_t as f64,
-                encode_chainlink_price(f.open),
-                encode_chainlink_price(f.high),
-                encode_chainlink_price(f.low),
-                encode_chainlink_price(f.close),
-            ]);
+            out.push(forming_bar_to_row(*f));
         }
     }
     out
@@ -330,6 +372,7 @@ mod tests {
         let history = vec![row(1000, 10.0, 11.0, 9.0, 10.5)];
         let mut forming = None;
         let mut sealed = None;
+        let mut live_bars = vec![];
         // 5m bucket: last_t=1000; t=1600 -> bar=1500 > 1000
         let bar_secs = 300;
         let out = merge_history_with_live(
@@ -339,6 +382,7 @@ mod tests {
             bar_secs,
             &mut forming,
             &mut sealed,
+            &mut live_bars,
         );
         assert_eq!(out.len(), 2);
         assert_eq!(out[1][0] as i64, 1500);
@@ -356,7 +400,8 @@ mod tests {
             close: 1.0,
         });
         let mut sealed = None;
-        let out = merge_history_with_live(&history, 10.8, 1600, 300, &mut forming, &mut sealed);
+        let mut live_bars = vec![];
+        let out = merge_history_with_live(&history, 10.8, 1600, 300, &mut forming, &mut sealed, &mut live_bars);
         assert_eq!(out.len(), 1);
         assert!(forming.is_none());
         assert!((decode_chainlink_price(out[0][4]) - 10.8).abs() < 1e-9);
@@ -381,6 +426,7 @@ mod tests {
             &sealed,
             &None,
             300,
+            &[],
         );
         assert!((decode_chainlink_price(out[0][4]) - 10.5).abs() < 1e-9);
     }
@@ -391,8 +437,9 @@ mod tests {
         let history = vec![row(1500, 10.0, 11.0, 9.0, 9.0)];
         let mut sealed = None;
         let mut forming = None;
-        merge_history_with_live(&history, 10.5, 1600, 300, &mut forming, &mut sealed);
-        let out = merge_history_with_live(&history, 10.1, 1900, 300, &mut forming, &mut sealed);
+        let mut live_bars = vec![];
+        merge_history_with_live(&history, 10.5, 1600, 300, &mut forming, &mut sealed, &mut live_bars);
+        let out = merge_history_with_live(&history, 10.1, 1900, 300, &mut forming, &mut sealed, &mut live_bars);
         assert_eq!(out.len(), 2);
         assert!(
             (decode_chainlink_price(out[0][4]) - 10.5).abs() < 1e-6,
@@ -409,6 +456,7 @@ mod tests {
         let history = vec![row(1_700_000_100, 10.0, 11.0, 9.0, 10.0), row(t_last, 10.1, 10.2, 10.0, 10.15)];
         let mut forming = None;
         let mut sealed = None;
+        let mut live_bars = vec![];
         let bar_secs = 300;
         let t_ms = t_last * 1000 + 50;
         let out = merge_history_with_live(
@@ -418,8 +466,47 @@ mod tests {
             bar_secs,
             &mut forming,
             &mut sealed,
+            &mut live_bars,
         );
         assert_eq!(out.len(), 2, "все ряды API на месте");
         assert!((decode_chainlink_price(out[1][4]) - 10.22).abs() < 1e-6);
+    }
+
+    #[test]
+    fn merge_preserves_live_bars_across_bucket_transitions() {
+        // REST never updates; three consecutive new buckets must all stay visible.
+        let history = vec![row(900, 10.0, 11.0, 9.0, 10.0)];
+        let mut forming = None;
+        let mut sealed = None;
+        let mut live_bars = vec![];
+        let bar_secs = 300;
+
+        // Tick into bar=1200
+        let out = merge_history_with_live(&history, 11.0, 1250, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        assert_eq!(out.len(), 2, "REST + forming 1200");
+        assert_eq!(forming.unwrap().bar_t, 1200);
+        assert!(live_bars.is_empty());
+
+        // Tick into bar=1500 — bar 1200 must graduate to live_bars
+        let out = merge_history_with_live(&history, 12.0, 1550, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        assert_eq!(live_bars.len(), 1, "bar 1200 graduated");
+        assert_eq!(live_bars[0].bar_t, 1200);
+        assert_eq!(forming.unwrap().bar_t, 1500);
+        assert_eq!(out.len(), 3, "REST + live 1200 + forming 1500");
+        let bar_ts: Vec<i64> = out.iter().map(|r| bar_time_for_timestamp(r[0] as i64, bar_secs)).collect();
+        assert!(bar_ts.contains(&900));
+        assert!(bar_ts.contains(&1200));
+        assert!(bar_ts.contains(&1500));
+
+        // Another tick in bar=1500 — live_bars unchanged, forming updated
+        let out = merge_history_with_live(&history, 12.5, 1600, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        assert_eq!(live_bars.len(), 1);
+        assert_eq!(out.len(), 3, "still 3 bars");
+
+        // Tick into bar=1800 — bar 1500 must graduate
+        let out = merge_history_with_live(&history, 13.0, 1850, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        assert_eq!(live_bars.len(), 2, "bar 1200 + bar 1500 in live_bars");
+        assert_eq!(forming.unwrap().bar_t, 1800);
+        assert_eq!(out.len(), 4, "REST + live 1200 + live 1500 + forming 1800");
     }
 }
