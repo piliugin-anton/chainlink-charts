@@ -31,11 +31,15 @@ export function computeFormingBar(
   }
 
   if (bar === lastT) {
+    const prevInBucket =
+      previousFormingRaw && Number(previousFormingRaw.time) === bar
+        ? previousFormingRaw
+        : null;
     return {
       time: barT,
       open: last!.open,
-      high: Math.max(last!.high, p),
-      low: Math.min(last!.low, p),
+      high: Math.max(last!.high, prevInBucket ? prevInBucket.high : -Infinity, p),
+      low: Math.min(last!.low, prevInBucket ? prevInBucket.low : Infinity, p),
       close: p,
     };
   }

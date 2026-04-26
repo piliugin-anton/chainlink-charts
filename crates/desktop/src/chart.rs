@@ -122,7 +122,21 @@ pub fn merge_history_with_live(
 
     if bar == last_bar_t {
         *forming = None;
-        let rest_out = candles_with_live_last(history, price, bar_secs);
+        // Substitute sealed_last into the base so each tick's high/low accumulates
+        // against the previous live tick, not the stale REST snapshot.
+        let rest_out = {
+            let mut base = history.to_vec();
+            if let Some((st, ref sealed_row)) = *sealed_last {
+                if st == last_bar_t {
+                    if let Some(j) = base.iter().rposition(|r| {
+                        r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == st
+                    }) {
+                        base[j] = sealed_row.clone();
+                    }
+                }
+            }
+            candles_with_live_last(&base, price, bar_secs)
+        };
         // sealed_last captures the live close of the last REST bar for use when a new bucket opens.
         if let Some(idx) = rightmost_in_highest_bar_bucket(&rest_out, bar_secs) {
             let t_key = bar_time_for_timestamp(rest_out[idx][0] as i64, bar_secs);
@@ -447,6 +461,32 @@ mod tests {
             decode_chainlink_price(out[0][4])
         );
         assert!((decode_chainlink_price(out[1][4]) - 10.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_preserves_live_wicks_across_ticks_in_same_bucket() {
+        // REST last candle: high=11, low=9. Live ticks should accumulate extremes, not reset to REST.
+        let history = vec![row(1500, 10.0, 11.0, 9.0, 10.5)];
+        let bar_secs = 300;
+        let mut forming = None;
+        let mut sealed = None;
+        let mut live_bars = vec![];
+
+        // Tick 1: price 13 — new high above REST high=11
+        let out1 = merge_history_with_live(&history, 13.0, 1600, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        assert!((decode_chainlink_price(out1[0][2]) - 13.0).abs() < 1e-6, "tick1 high=13");
+
+        // Tick 2: price 10.5 — must NOT lose the high of 13 established by tick 1
+        let out2 = merge_history_with_live(&history, 10.5, 1620, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        assert!((decode_chainlink_price(out2[0][2]) - 13.0).abs() < 1e-6, "tick2 must keep high=13, got {}", decode_chainlink_price(out2[0][2]));
+
+        // Tick 3: price 7 — new low below REST low=9
+        let out3 = merge_history_with_live(&history, 7.0, 1640, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        assert!((decode_chainlink_price(out3[0][3]) - 7.0).abs() < 1e-6, "tick3 low=7");
+
+        // Tick 4: price 10 — must NOT lose the low of 7
+        let out4 = merge_history_with_live(&history, 10.0, 1660, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        assert!((decode_chainlink_price(out4[0][3]) - 7.0).abs() < 1e-6, "tick4 must keep low=7, got {}", decode_chainlink_price(out4[0][3]));
     }
 
     #[test]

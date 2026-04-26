@@ -40,4 +40,26 @@ describe("computeFormingBar", () => {
     expect(r!.high).toBe(60);
     expect(r!.low).toBe(40);
   });
+
+  it("preserves live-tick extremes across multiple ticks within the last history bucket", () => {
+    const tRow = 1800 as UTCTimestamp;
+    const h = [{ time: tRow, open: 50, high: 60, low: 40, close: 55 }];
+
+    // tick 1: price 70 > history high 60 → new high = 70
+    const r0 = computeFormingBar(h, { price: 70, t: 1900 }, RES_5M, null);
+    expect(r0!.high).toBe(70);
+    expect(r0!.low).toBe(40);
+
+    // tick 2: price 55 — should NOT lose the 70 high established by tick 1
+    const r1 = computeFormingBar(h, { price: 55, t: 1920 }, RES_5M, r0);
+    expect(r1!.high).toBe(70);
+
+    // tick 3: price 30 < history low 40 → new low = 30
+    const r2 = computeFormingBar(h, { price: 30, t: 1940 }, RES_5M, r1);
+    expect(r2!.low).toBe(30);
+
+    // tick 4: price 55 — should NOT lose the 30 low established by tick 3
+    const r3 = computeFormingBar(h, { price: 55, t: 1960 }, RES_5M, r2);
+    expect(r3!.low).toBe(30);
+  });
 });
