@@ -58,10 +58,7 @@ pub async fn fetch_history(
     let body: HistoryRowsResponse = serde_json::from_str(&text)?;
     if let Some(ref e) = body.error {
         if !e.is_empty() {
-            return Err(BffError::Http(
-                status,
-                format!("API error field: {e}"),
-            ));
+            return Err(BffError::Http(status, format!("API error field: {e}")));
         }
     }
     Ok(body)

@@ -5,18 +5,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use egui::epaint::CornerRadiusF32;
 use egui::{
-    pos2, vec2, Color32, CursorIcon, FontId, LayerId, Order, PointerButton, Rect, Shape, Stroke,
-    Vec2b,
+    emath::Rangef, pos2, vec2, Color32, CursorIcon, FontId, LayerId, Order, PointerButton, Rect,
+    Shape, Stroke, Vec2b,
 };
 use egui_plot::{
-    Corner, CoordinatesFormatter, GridMark, HLine, LineStyle, Plot, PlotBounds, PlotPoint,
-    PlotResponse, PlotUi,
+    uniform_grid_spacer, CoordinatesFormatter, Corner, GridInput, GridMark, HLine, LineStyle, Plot,
+    PlotBounds, PlotPoint, PlotResponse, PlotUi,
 };
 use reqwest::Client;
 
 use crate::assets::ASSET_LIST;
-use crate::chart::{self, FormingBarState, SealedCandleRow};
 use crate::bff::{self, HistoryRowsResponse};
+use crate::chart::{self, FormingBarState, SealedCandleRow};
 use crate::stream::{self, LastPrice, StreamUiStatus};
 use crate::unix_time;
 use tokio::runtime::Handle;
@@ -35,12 +35,42 @@ fn format_plot_time_axis(mark: GridMark, range: &RangeInclusive<f64>) -> String 
     unix_time::format_axis_label_utc(s, w)
 }
 
+/// Наименьшее из ряда 1, 2, 5×10ᵏ, … ≥ `m` — для «красивого» числа баров между линиями сетки.
+fn nice_ceiled_unit(m: f64) -> f64 {
+    let m = m.max(1e-30);
+    if m <= 1.0 {
+        return 1.0;
+    }
+    let log10 = m.log10().floor();
+    let base = 10f64.powf(log10);
+    for mult in [1.0, 2.0, 5.0, 10.0] {
+        let cand = base * mult;
+        if cand + f64::EPSILON >= m {
+            return cand;
+        }
+    }
+    base * 10.0
+}
+
+/// Три шага по оси X (секунды), все кратны `bar_secs` — линии совпадают с открытием бакетов свечей.
+fn bar_synced_x_grid_steps(min_step_secs: f64, bar_secs: f64) -> [f64; 3] {
+    let bar = bar_secs.max(f64::EPSILON);
+    let k = nice_ceiled_unit((min_step_secs / bar).ceil().max(1.0));
+    let s0 = k * bar;
+    [s0, s0 * 10.0, s0 * 100.0]
+}
+
 /// Must match `Plot::y_axis_min_width` (extra space for wide tick labels).
 const CHART_Y_AXIS_MIN_WIDTH: f32 = 132.0;
 const PRICE_SCALE_LABEL_PAD: f32 = 40.0;
 
+/// Минимум px между линиями сетки (как у дефолта `egui_plot::Plot::grid_spacing`); задан явно вместе с X-spacer.
+const CHART_GRID_MIN_SPACING_PX: f32 = 8.0;
+/// Зазор между телами свечей по X в px — тот же порядок, что `gap_x` в `box_plot_from_history`.
+const CHART_CANDLE_BODY_GAP_PX: f32 = 1.0;
+
 /// TradingView-style: vertical drag on the **left price strip** (next to, but not in, the plot area)
-/// zooms the Y scale; the main area pans time only (no vertical pan from drag).
+/// zooms the Y scale; the main plot area pans horizontally and vertically.
 fn apply_price_scale_y_zoom(plot_ui: &mut PlotUi) {
     let pr = plot_ui.response().rect;
     let left = pr.left() - (CHART_Y_AXIS_MIN_WIDTH + PRICE_SCALE_LABEL_PAD);
@@ -55,9 +85,7 @@ fn apply_price_scale_y_zoom(plot_ui: &mut PlotUi) {
         return;
     }
     ctx.set_cursor_icon(CursorIcon::ResizeVertical);
-    if !ctx
-        .input(|i| i.pointer.button_down(PointerButton::Primary))
-    {
+    if !ctx.input(|i| i.pointer.button_down(PointerButton::Primary)) {
         return;
     }
     let dy: f32 = ctx.input(|i| i.pointer.delta().y);
@@ -74,9 +102,7 @@ fn apply_price_scale_y_zoom(plot_ui: &mut PlotUi) {
 /// Map mouse / trackpad scroll to **horizontal (time) zoom** only. Default `egui_plot` scroll pans;
 /// we turn that off with `allow_scroll(false)` and apply X zoom here (see `allow_zoom` for pinch/Ctrl+wheel).
 fn apply_time_axis_scroll_zoom(plot_ui: &mut PlotUi) {
-    let d = plot_ui
-        .ctx()
-        .input(|i| i.smooth_scroll_delta);
+    let d = plot_ui.ctx().input(|i| i.smooth_scroll_delta);
     if d == egui::Vec2::ZERO {
         return;
     }
@@ -133,10 +159,7 @@ fn paint_current_price_y_axis_tag(
         .painter()
         .layout_no_wrap(text, font, Color32::PLACEHOLDER);
     let ts = galley.size();
-    let box_size = vec2(
-        ts.x + 2.0 * PRICE_TAG_PAD,
-        ts.y + 2.0 * PRICE_TAG_PAD,
-    );
+    let box_size = vec2(ts.x + 2.0 * PRICE_TAG_PAD, ts.y + 2.0 * PRICE_TAG_PAD);
     let right = pr.min.x - PRICE_TAG_GAP;
     let tag = Rect::from_min_size(
         pos2(right - box_size.x, y_clamped - 0.5 * box_size.y),
@@ -148,16 +171,10 @@ fn paint_current_price_y_axis_tag(
     let layer = LayerId::new(Order::Tooltip, ui.id().with("cur_price_badge"));
     let mut p = ui.ctx().layer_painter(layer);
     p.set_clip_rect(ui.clip_rect());
-    p.add(Shape::line_segment(
-        [p1, p2],
-        Stroke::new(1.0, line_color),
-    ));
+    p.add(Shape::line_segment([p1, p2], Stroke::new(1.0, line_color)));
     p.rect_filled(tag, CornerRadiusF32::same(3.0), line_color);
     p.galley_with_override_text_color(
-        pos2(
-            tag.min.x + PRICE_TAG_PAD,
-            tag.min.y + PRICE_TAG_PAD,
-        ),
+        pos2(tag.min.x + PRICE_TAG_PAD, tag.min.y + PRICE_TAG_PAD),
         galley,
         Color32::WHITE,
     );
@@ -270,16 +287,10 @@ impl ChainlinkApp {
         self.runtime.spawn(async move {
             let now = unix_now_secs();
             let from = now - 86400;
-            let body = bff::fetch_history(
-                &client,
-                &base,
-                &api_symbol,
-                resolution.as_str(),
-                from,
-                now,
-            )
-            .await
-            .map_err(|e| e.to_string());
+            let body =
+                bff::fetch_history(&client, &base, &api_symbol, resolution.as_str(), from, now)
+                    .await
+                    .map_err(|e| e.to_string());
             *slot.lock().expect("history slot") = Some(body);
             ctx.request_repaint();
         });
@@ -361,8 +372,7 @@ impl ChainlinkApp {
                         *forming_bar = None;
                         *sealed_last_row = None;
                         live_bars.clear();
-                        history_refresh =
-                            Some((api_symbol.clone(), r, history.clone()));
+                        history_refresh = Some((api_symbol.clone(), r, history.clone()));
                     }
                 }
             });
@@ -420,13 +430,10 @@ impl ChainlinkApp {
                         let (x_lo, x_hi) = chart::candle_row_time_range(&candles);
                         // egui_plot: HLine не задаёт X в bounds(); явно растягиваем min/max по времени свечей.
                         let x_pad = bar_secs_f * 0.6;
-                        let (box_plot, hline_stroke) = (
-                            chart::box_plot_from_history(&candles, bar_secs_f),
-                            last
-                                .as_ref()
-                                .and_then(|_| chart::last_candle_stroke_color(&candles, bar_secs)),
-                        );
-                        if let Some(box_plot) = box_plot {
+                        let hline_stroke = last
+                            .as_ref()
+                            .and_then(|_| chart::last_candle_stroke_color(&candles, bar_secs));
+                        if chart::ohlc_chart_has_data(&candles) {
                             let mut plot = Plot::new("ohlc_candles")
                                 // With no fixed height, Plot fills remaining CentralPanel space; price
                                 // axis and candle area stretch with the window. Y axis default
@@ -435,11 +442,9 @@ impl ChainlinkApp {
                                 // the formatter add gap before candles.
                                 .y_axis_min_width(CHART_Y_AXIS_MIN_WIDTH)
                                 .x_axis_formatter(format_plot_time_axis)
-                                .y_axis_formatter(
-                                    |mark: GridMark, _range: &RangeInclusive<f64>| {
-                                        format!("{:.2}   ", mark.value)
-                                    },
-                                )
+                                .y_axis_formatter(|mark: GridMark, _range: &RangeInclusive<f64>| {
+                                    format!("{:.2}   ", mark.value)
+                                })
                                 // Подсказка при наведении: время UTC, не сырой timestamp по X
                                 .coordinates_formatter(
                                     Corner::LeftBottom,
@@ -454,47 +459,60 @@ impl ChainlinkApp {
                                         },
                                     ),
                                 )
-                                // Pan in time only; vertical drag on the main area does not shift Y (see price strip below).
-                                .allow_drag(Vec2b {
-                                    x: true,
-                                    y: false,
-                                })
+                                // Pan X+Y; left price strip still uses vertical drag for Y zoom (see `apply_price_scale_y_zoom`).
+                                .allow_drag(Vec2b { x: true, y: true })
                                 // Pinch / Ctrl+wheel: time axis only; Y scale uses the price column drag.
-                                .allow_zoom(Vec2b {
-                                    x: true,
-                                    y: false,
-                                })
+                                .allow_zoom(Vec2b { x: true, y: false })
                                 // Replaced with `apply_time_axis_scroll_zoom` (X zoom) instead of pan.
-                                .allow_scroll(Vec2b {
-                                    x: false,
-                                    y: false,
+                                .allow_scroll(Vec2b { x: false, y: false })
+                                .grid_spacing(Rangef::new(CHART_GRID_MIN_SPACING_PX, 300.0))
+                                // X: шаги кратны `bar_secs` (как у `bar_time_for_timestamp`), плюс учёт 1px зазора тел.
+                                .x_grid_spacer({
+                                    let inner = uniform_grid_spacer({
+                                        let bar = bar_secs_f;
+                                        move |input: GridInput| {
+                                            let scale = f64::from(
+                                                (CHART_GRID_MIN_SPACING_PX
+                                                    + CHART_CANDLE_BODY_GAP_PX)
+                                                    / CHART_GRID_MIN_SPACING_PX,
+                                            );
+                                            bar_synced_x_grid_steps(
+                                                input.base_step_size * scale,
+                                                bar,
+                                            )
+                                        }
+                                    });
+                                    move |input: GridInput| inner(input)
                                 });
                             if let (Some(lo), Some(hi)) = (x_lo, x_hi) {
                                 plot = plot
                                     .include_x((lo as f64) - x_pad)
                                     .include_x((hi as f64) + x_pad);
                             }
-                            let plot_response = plot
-                                .show(ui, |plot_ui| {
+                            let plot_response = plot.show(ui, |plot_ui| {
+                                // 1 screen px → plot X (seconds); `dvalue_dpos` = plot units per ui point
+                                let gap_x = plot_ui.transform().dvalue_dpos()[0].abs();
+                                if let Some(box_plot) =
+                                    chart::box_plot_from_history(&candles, bar_secs_f, gap_x)
+                                {
                                     plot_ui.add(box_plot);
-                                    if let Some(p) = last.as_ref() {
-                                        let col = hline_stroke.unwrap_or_else(|| {
-                                            Color32::from_rgb(100, 180, 255)
-                                        });
-                                        plot_ui.hline(
-                                            HLine::new("Current price", p.price)
-                                                .color(col)
-                                                .width(1.0)
-                                                .style(LineStyle::dashed_loose()),
-                                        );
-                                    }
-                                    apply_time_axis_scroll_zoom(plot_ui);
-                                    apply_price_scale_y_zoom(plot_ui);
-                                });
+                                }
+                                if let Some(p) = last.as_ref() {
+                                    let col = hline_stroke
+                                        .unwrap_or_else(|| Color32::from_rgb(100, 180, 255));
+                                    plot_ui.hline(
+                                        HLine::new("Current price", p.price)
+                                            .color(col)
+                                            .width(1.0)
+                                            .style(LineStyle::dashed_loose()),
+                                    );
+                                }
+                                apply_time_axis_scroll_zoom(plot_ui);
+                                apply_price_scale_y_zoom(plot_ui);
+                            });
                             if let Some(p) = last.as_ref() {
-                                let tag_color = hline_stroke.unwrap_or_else(|| {
-                                    Color32::from_rgb(100, 180, 255)
-                                });
+                                let tag_color = hline_stroke
+                                    .unwrap_or_else(|| Color32::from_rgb(100, 180, 255));
                                 paint_current_price_y_axis_tag(
                                     ui,
                                     &plot_response,
@@ -502,9 +520,9 @@ impl ChainlinkApp {
                                     tag_color,
                                 );
                             }
-                    } else {
-                        ui.label("Could not build candles from the API response.");
-                    }
+                        } else {
+                            ui.label("Could not build candles from the API response.");
+                        }
                     }
                 }
             }
@@ -532,11 +550,9 @@ impl ChainlinkApp {
 
 impl eframe::App for ChainlinkApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            match &self.screen {
-                Screen::List => self.ui_list(ui),
-                Screen::Detail { .. } => self.ui_detail(ui),
-            }
+        egui::CentralPanel::default().show_inside(ui, |ui| match &self.screen {
+            Screen::List => self.ui_list(ui),
+            Screen::Detail { .. } => self.ui_detail(ui),
         });
     }
 }

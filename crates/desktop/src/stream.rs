@@ -143,13 +143,7 @@ pub async fn stream_loop(
                     };
                     let t = event_time_to_unix_sec(t);
                     let price = decode_chainlink_price(p);
-                    map.insert(
-                        sym.to_string(),
-                        LastPrice {
-                            price,
-                            t,
-                        },
-                    );
+                    map.insert(sym.to_string(), LastPrice { price, t });
                     changed = true;
                 }
             }
