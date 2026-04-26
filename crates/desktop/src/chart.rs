@@ -111,9 +111,9 @@ pub fn merge_history_with_live(
 
     // Remove live bars that REST has now confirmed.
     live_bars.retain(|fb| {
-        !history.iter().any(|r| {
-            r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == fb.bar_t
-        })
+        !history
+            .iter()
+            .any(|r| r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == fb.bar_t)
     });
 
     if bar < last_bar_t {
@@ -159,9 +159,10 @@ pub fn merge_history_with_live(
     let mut out = history.to_vec();
     if let Some((st, row)) = sealed_last.as_ref() {
         if *st == last_bar_t {
-            if let Some(j) = out.iter().rposition(|r| {
-                r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == *st
-            }) {
+            if let Some(j) = out
+                .iter()
+                .rposition(|r| r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == *st)
+            {
                 out[j] = row.clone();
             }
         }
@@ -202,9 +203,10 @@ pub fn display_candles_without_live_tick(
     let mut out = history.to_vec();
     if let Some((st, row)) = sealed {
         if *st == last_bar_t {
-            if let Some(j) = out.iter().rposition(|r| {
-                r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == *st
-            }) {
+            if let Some(j) = out
+                .iter()
+                .rposition(|r| r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == *st)
+            {
                 out[j] = row.clone();
             }
         }
@@ -212,9 +214,9 @@ pub fn display_candles_without_live_tick(
     let mut sorted_live: Vec<&FormingBarState> = live_bars
         .iter()
         .filter(|fb| {
-            !history.iter().any(|r| {
-                r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == fb.bar_t
-            })
+            !history
+                .iter()
+                .any(|r| r.len() >= 5 && bar_time_for_timestamp(r[0] as i64, bar_secs) == fb.bar_t)
         })
         .collect();
     sorted_live.sort_unstable_by_key(|fb| fb.bar_t);
@@ -281,7 +283,11 @@ fn min_price_spread(anchor: f64) -> f64 {
 /// Упрощённый аналог `normalizeCandleForDisplay` из `src/lib/chainlink/candles.ts`.
 fn normalize_ohlc_display(open: f64, high: f64, low: f64, close: f64) -> (f64, f64, f64, f64) {
     let ref_ = (high + low) / 2.0;
-    let anchor = if ref_.abs() > f64::EPSILON { ref_ } else { close };
+    let anchor = if ref_.abs() > f64::EPSILON {
+        ref_
+    } else {
+        close
+    };
     let spread = min_price_spread(anchor);
     let mut high = high;
     let mut low = low;
@@ -311,8 +317,19 @@ fn normalize_ohlc_display(open: f64, high: f64, low: f64, close: f64) -> (f64, f
     (open, high, low, close)
 }
 
-/// `bar_secs` — длина бара в секундах (300 для 5m, 900 для 15m) для ширины тела на оси времени.
-pub fn box_plot_from_history(candles: &[Vec<f64>], bar_secs: f64) -> Option<BoxPlot> {
+/// Есть ли хотя бы один ряд OHLC, из которого [`box_plot_from_history`] построит хотя бы один бакет.
+pub fn ohlc_chart_has_data(candles: &[Vec<f64>]) -> bool {
+    candles.iter().any(|row| row.len() >= 5)
+}
+
+/// `bar_secs` — длина бара в секундах (300 для 5m, 900 для 15m).
+/// `x_gap_plot` — зазор между соседними телами в тех же единицах, что и X (секунды UTC на графике);
+/// для зазора в 1 экранном пикселе: `plot_ui.transform().dvalue_dpos()[0].abs()`.
+pub fn box_plot_from_history(
+    candles: &[Vec<f64>],
+    bar_secs: f64,
+    x_gap_plot: f64,
+) -> Option<BoxPlot> {
     let bar_s = bar_secs as i64;
     // Ключ = начало бакета, как в `barTimeForTimestamp` — иначе два t в одном интервале из-за
     // f64/JSON съезжают в разные i64 и в HashMap «теряется» свеча; соседние сливались в один x.
@@ -338,7 +355,9 @@ pub fn box_plot_from_history(candles: &[Vec<f64>], bar_secs: f64) -> Option<BoxP
     let mut times: Vec<i64> = by_t.keys().copied().collect();
     times.sort_unstable();
 
-    let box_width = (bar_secs * 0.55).clamp(30.0, bar_secs * 0.95);
+    // `BoxElem` центрирует тело на `argument`. Сетка по X — на `t` = открытие бакета; левый край тела = `t`
+    // ⇒ `argument = t + box_width/2`. Соседние центры на расстоянии `bar_secs`; зазор между телами `bar_secs - w`.
+    let box_width = (bar_secs - x_gap_plot.max(0.0)).max(1e-9).min(bar_secs);
 
     let mut boxes = Vec::with_capacity(times.len());
     for t in times {
@@ -355,7 +374,8 @@ pub fn box_plot_from_history(candles: &[Vec<f64>], bar_secs: f64) -> Option<BoxP
         let stroke = Stroke::new(1.0, fill);
 
         let spread = BoxSpread::new(l, lo, mid, hi, h);
-        let elem = BoxElem::new(t as f64, spread)
+        let x_argument = t as f64 + box_width / 2.0;
+        let elem = BoxElem::new(x_argument, spread)
             .whisker_width(0.0)
             .box_width(box_width)
             .fill(fill.linear_multiply(0.35))
@@ -415,7 +435,15 @@ mod tests {
         });
         let mut sealed = None;
         let mut live_bars = vec![];
-        let out = merge_history_with_live(&history, 10.8, 1600, 300, &mut forming, &mut sealed, &mut live_bars);
+        let out = merge_history_with_live(
+            &history,
+            10.8,
+            1600,
+            300,
+            &mut forming,
+            &mut sealed,
+            &mut live_bars,
+        );
         assert_eq!(out.len(), 1);
         assert!(forming.is_none());
         assert!((decode_chainlink_price(out[0][4]) - 10.8).abs() < 1e-9);
@@ -425,23 +453,14 @@ mod tests {
     #[test]
     fn display_without_tick_keeps_sealed_not_raw_rest() {
         let history = vec![row(1500, 10.0, 11.0, 9.0, 9.0)];
-        let sealed = Some((
-            1500_i64,
-            {
-                let mut c = history[0].clone();
-                c[4] = encode_chainlink_price(10.5);
-                c[2] = encode_chainlink_price(11.0);
-                c[3] = encode_chainlink_price(9.0);
-                c
-            },
-        ));
-        let out = display_candles_without_live_tick(
-            &history,
-            &sealed,
-            &None,
-            300,
-            &[],
-        );
+        let sealed = Some((1500_i64, {
+            let mut c = history[0].clone();
+            c[4] = encode_chainlink_price(10.5);
+            c[2] = encode_chainlink_price(11.0);
+            c[3] = encode_chainlink_price(9.0);
+            c
+        }));
+        let out = display_candles_without_live_tick(&history, &sealed, &None, 300, &[]);
         assert!((decode_chainlink_price(out[0][4]) - 10.5).abs() < 1e-9);
     }
 
@@ -452,8 +471,24 @@ mod tests {
         let mut sealed = None;
         let mut forming = None;
         let mut live_bars = vec![];
-        merge_history_with_live(&history, 10.5, 1600, 300, &mut forming, &mut sealed, &mut live_bars);
-        let out = merge_history_with_live(&history, 10.1, 1900, 300, &mut forming, &mut sealed, &mut live_bars);
+        merge_history_with_live(
+            &history,
+            10.5,
+            1600,
+            300,
+            &mut forming,
+            &mut sealed,
+            &mut live_bars,
+        );
+        let out = merge_history_with_live(
+            &history,
+            10.1,
+            1900,
+            300,
+            &mut forming,
+            &mut sealed,
+            &mut live_bars,
+        );
         assert_eq!(out.len(), 2);
         assert!(
             (decode_chainlink_price(out[0][4]) - 10.5).abs() < 1e-6,
@@ -493,7 +528,10 @@ mod tests {
     fn merge_accepts_stream_time_in_millis_aligns_with_history_sec() {
         // API — сек; стрим — мс (тот же момент). Без нормализации сравнение `bar` с историей ломается.
         let t_last = 1_700_000_400i64;
-        let history = vec![row(1_700_000_100, 10.0, 11.0, 9.0, 10.0), row(t_last, 10.1, 10.2, 10.0, 10.15)];
+        let history = vec![
+            row(1_700_000_100, 10.0, 11.0, 9.0, 10.0),
+            row(t_last, 10.1, 10.2, 10.0, 10.15),
+        ];
         let mut forming = None;
         let mut sealed = None;
         let mut live_bars = vec![];
@@ -522,29 +560,64 @@ mod tests {
         let bar_secs = 300;
 
         // Tick into bar=1200
-        let out = merge_history_with_live(&history, 11.0, 1250, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        let out = merge_history_with_live(
+            &history,
+            11.0,
+            1250,
+            bar_secs,
+            &mut forming,
+            &mut sealed,
+            &mut live_bars,
+        );
         assert_eq!(out.len(), 2, "REST + forming 1200");
         assert_eq!(forming.unwrap().bar_t, 1200);
         assert!(live_bars.is_empty());
 
         // Tick into bar=1500 — bar 1200 must graduate to live_bars
-        let out = merge_history_with_live(&history, 12.0, 1550, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        let out = merge_history_with_live(
+            &history,
+            12.0,
+            1550,
+            bar_secs,
+            &mut forming,
+            &mut sealed,
+            &mut live_bars,
+        );
         assert_eq!(live_bars.len(), 1, "bar 1200 graduated");
         assert_eq!(live_bars[0].bar_t, 1200);
         assert_eq!(forming.unwrap().bar_t, 1500);
         assert_eq!(out.len(), 3, "REST + live 1200 + forming 1500");
-        let bar_ts: Vec<i64> = out.iter().map(|r| bar_time_for_timestamp(r[0] as i64, bar_secs)).collect();
+        let bar_ts: Vec<i64> = out
+            .iter()
+            .map(|r| bar_time_for_timestamp(r[0] as i64, bar_secs))
+            .collect();
         assert!(bar_ts.contains(&900));
         assert!(bar_ts.contains(&1200));
         assert!(bar_ts.contains(&1500));
 
         // Another tick in bar=1500 — live_bars unchanged, forming updated
-        let out = merge_history_with_live(&history, 12.5, 1600, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        let out = merge_history_with_live(
+            &history,
+            12.5,
+            1600,
+            bar_secs,
+            &mut forming,
+            &mut sealed,
+            &mut live_bars,
+        );
         assert_eq!(live_bars.len(), 1);
         assert_eq!(out.len(), 3, "still 3 bars");
 
         // Tick into bar=1800 — bar 1500 must graduate
-        let out = merge_history_with_live(&history, 13.0, 1850, bar_secs, &mut forming, &mut sealed, &mut live_bars);
+        let out = merge_history_with_live(
+            &history,
+            13.0,
+            1850,
+            bar_secs,
+            &mut forming,
+            &mut sealed,
+            &mut live_bars,
+        );
         assert_eq!(live_bars.len(), 2, "bar 1200 + bar 1500 in live_bars");
         assert_eq!(forming.unwrap().bar_t, 1800);
         assert_eq!(out.len(), 4, "REST + live 1200 + live 1500 + forming 1800");

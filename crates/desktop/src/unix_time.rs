@@ -24,7 +24,11 @@ fn is_leap_y(y: i32) -> bool {
 }
 
 fn year_len_days(y: i32) -> i64 {
-    if is_leap_y(y) { 366 } else { 365 }
+    if is_leap_y(y) {
+        366
+    } else {
+        365
+    }
 }
 
 /// Календарь UTC: `days` — полных суток с 1970-01-01, день 0 = 1970-01-01.
@@ -103,18 +107,12 @@ mod tests {
 
     #[test]
     fn epoch_utc() {
-        assert_eq!(
-            format_compact_utc(0),
-            "1970-01-01  00:00:00 UTC"
-        );
+        assert_eq!(format_compact_utc(0), "1970-01-01  00:00:00 UTC");
     }
 
     #[test]
     fn one_day() {
-        assert_eq!(
-            format_compact_utc(86_400),
-            "1970-01-02  00:00:00 UTC"
-        );
+        assert_eq!(format_compact_utc(86_400), "1970-01-02  00:00:00 UTC");
     }
 
     #[test]
