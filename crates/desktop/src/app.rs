@@ -21,6 +21,8 @@ use crate::stream::{self, LastPrice, StreamUiStatus};
 use crate::unix_time;
 use tokio::runtime::Handle;
 
+type TickQueue = Arc<Mutex<HashMap<String, Vec<LastPrice>>>>;
+
 fn unix_now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -227,6 +229,7 @@ pub struct ChainlinkApp {
     client: Client,
     egui_ctx: egui::Context,
     stream_prices: Arc<Mutex<HashMap<String, LastPrice>>>,
+    tick_queue: TickQueue,
     stream_status: Arc<Mutex<StreamUiStatus>>,
     stream_err: Arc<Mutex<Option<String>>>,
     screen: Screen,
@@ -250,6 +253,7 @@ impl ChainlinkApp {
 
         let egui_ctx = cc.egui_ctx.clone();
         let stream_prices = Arc::new(Mutex::new(HashMap::new()));
+        let tick_queue: TickQueue = Arc::new(Mutex::new(HashMap::new()));
         let stream_status = Arc::new(Mutex::new(StreamUiStatus::Connecting));
         let stream_err = Arc::new(Mutex::new(None));
 
@@ -258,6 +262,7 @@ impl ChainlinkApp {
             stream_client,
             egui_ctx.clone(),
             stream_prices.clone(),
+            tick_queue.clone(),
             stream_status.clone(),
             stream_err.clone(),
         ));
@@ -268,6 +273,7 @@ impl ChainlinkApp {
             client,
             egui_ctx,
             stream_prices,
+            tick_queue,
             stream_status,
             stream_err,
             screen: Screen::List,
@@ -408,7 +414,31 @@ impl ChainlinkApp {
                     } else {
                         let bar_secs = resolution.bar_seconds() as i64;
                         let bar_secs_f = resolution.bar_seconds();
-                        let candles: Vec<Vec<f64>> = if let Some(p) = &last {
+                        // Drain all ticks accumulated while the window may have been in the
+                        // background. Replaying them in order ensures forming_bar and live_bars
+                        // stay consistent even across multiple bar transitions that happened
+                        // while no UI frames were rendered.
+                        let pending_ticks: Vec<LastPrice> = self
+                            .tick_queue
+                            .lock()
+                            .expect("tick_queue")
+                            .remove(api_symbol.as_str())
+                            .unwrap_or_default();
+                        let candles: Vec<Vec<f64>> = if !pending_ticks.is_empty() {
+                            let mut result = vec![];
+                            for tick in &pending_ticks {
+                                result = chart::merge_history_with_live(
+                                    &h.candles,
+                                    tick.price,
+                                    tick.t,
+                                    bar_secs,
+                                    forming_bar,
+                                    sealed_last_row,
+                                    live_bars,
+                                );
+                            }
+                            result
+                        } else if let Some(p) = &last {
                             chart::merge_history_with_live(
                                 &h.candles,
                                 p.price,

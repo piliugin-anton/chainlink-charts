@@ -42,11 +42,16 @@ fn time_field_as_i64(v: &Value) -> Option<i64> {
     }
 }
 
+/// Maximum ticks held per symbol while the UI is not rendering (e.g. window minimised).
+/// Older ticks beyond this limit are dropped; only the newest are kept.
+const MAX_PENDING_TICKS: usize = 1000;
+
 pub async fn stream_loop(
     base_url: String,
     client: reqwest::Client,
     ctx: egui::Context,
     prices: Arc<Mutex<HashMap<String, LastPrice>>>,
+    tick_queue: Arc<Mutex<HashMap<String, Vec<LastPrice>>>>,
     status: Arc<Mutex<StreamUiStatus>>,
     last_err: Arc<Mutex<Option<String>>>,
 ) {
@@ -120,6 +125,7 @@ pub async fn stream_loop(
             buf = new_buf;
 
             let mut changed = false;
+            let mut ticks_to_queue: Vec<(String, LastPrice)> = Vec::new();
             {
                 let mut map = prices.lock().unwrap();
                 for msg in messages {
@@ -143,8 +149,21 @@ pub async fn stream_loop(
                     };
                     let t = event_time_to_unix_sec(t);
                     let price = decode_chainlink_price(p);
-                    map.insert(sym.to_string(), LastPrice { price, t });
+                    let lp = LastPrice { price, t };
+                    map.insert(sym.to_string(), lp.clone());
+                    ticks_to_queue.push((sym.to_string(), lp));
                     changed = true;
+                }
+            }
+            if !ticks_to_queue.is_empty() {
+                let mut queue = tick_queue.lock().unwrap();
+                for (sym, lp) in ticks_to_queue {
+                    let entry = queue.entry(sym).or_insert_with(Vec::new);
+                    entry.push(lp);
+                    if entry.len() > MAX_PENDING_TICKS {
+                        let excess = entry.len() - MAX_PENDING_TICKS;
+                        entry.drain(..excess);
+                    }
                 }
             }
             if changed {
