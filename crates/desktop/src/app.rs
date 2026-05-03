@@ -15,7 +15,8 @@ use egui_plot::{
 use reqwest::Client;
 
 use crate::assets::ASSET_LIST;
-use crate::bff::{self, HistoryRowsResponse};
+use crate::auth;
+use crate::candlestick::{self, HistoryRowsResponse};
 use crate::chart::{self, FormingBarState, SealedCandleRow};
 use crate::stream::{self, LastPrice, StreamUiStatus};
 use crate::unix_time;
@@ -224,7 +225,9 @@ pub enum Screen {
 }
 
 pub struct ChainlinkApp {
-    base_url: String,
+    user_id: String,
+    api_key: String,
+    token_cache: auth::TokenCache,
     runtime: Handle,
     client: Client,
     egui_ctx: egui::Context,
@@ -237,29 +240,26 @@ pub struct ChainlinkApp {
 
 impl ChainlinkApp {
     pub fn new(cc: &eframe::CreationContext<'_>, runtime: Handle) -> Self {
-        let base_url = std::env::var("CHAINLINK_CHARTS_BASE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
+        let user_id = std::env::var("CHAINLINK_USER_ID")
+            .expect("CHAINLINK_USER_ID env var is required");
+        let api_key = std::env::var("CHAINLINK_API_KEY")
+            .expect("CHAINLINK_API_KEY env var is required");
 
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .expect("reqwest client");
 
-        // Long-lived stream: avoid per-request client default timeout.
-        let stream_client = Client::builder()
-            .timeout(Duration::MAX)
-            .build()
-            .expect("stream reqwest client");
-
         let egui_ctx = cc.egui_ctx.clone();
         let stream_prices = Arc::new(Mutex::new(HashMap::new()));
         let tick_queue: TickQueue = Arc::new(Mutex::new(HashMap::new()));
         let stream_status = Arc::new(Mutex::new(StreamUiStatus::Connecting));
         let stream_err = Arc::new(Mutex::new(None));
+        let token_cache = auth::new_token_cache();
 
         runtime.spawn(stream::stream_loop(
-            base_url.clone(),
-            stream_client,
+            user_id.clone(),
+            api_key.clone(),
             egui_ctx.clone(),
             stream_prices.clone(),
             tick_queue.clone(),
@@ -268,7 +268,9 @@ impl ChainlinkApp {
         ));
 
         Self {
-            base_url,
+            user_id,
+            api_key,
+            token_cache,
             runtime,
             client,
             egui_ctx,
@@ -288,15 +290,25 @@ impl ChainlinkApp {
     ) {
         *slot.lock().expect("history lock") = None;
         let client = self.client.clone();
-        let base = self.base_url.clone();
+        let cache = self.token_cache.clone();
+        let user_id = self.user_id.clone();
+        let api_key = self.api_key.clone();
         let ctx = self.egui_ctx.clone();
         self.runtime.spawn(async move {
             let now = unix_now_secs();
             let from = now - 86400;
-            let body =
-                bff::fetch_history(&client, &base, &api_symbol, resolution.as_str(), from, now)
-                    .await
-                    .map_err(|e| e.to_string());
+            let body = candlestick::fetch_history(
+                &client,
+                &cache,
+                &user_id,
+                &api_key,
+                &api_symbol,
+                resolution.as_str(),
+                from,
+                now,
+            )
+            .await
+            .map_err(|e| e.to_string());
             *slot.lock().expect("history slot") = Some(body);
             ctx.request_repaint();
         });
@@ -323,7 +335,7 @@ impl ChainlinkApp {
             StreamUiStatus::Live => "Stream: live",
             StreamUiStatus::Reconnecting => "Stream: reconnecting…",
             StreamUiStatus::Error => "Stream: error",
-            StreamUiStatus::Unconfigured => "Server not configured (503)",
+            StreamUiStatus::Unconfigured => "Stream: credentials missing or invalid",
         }
     }
 
@@ -334,7 +346,7 @@ impl ChainlinkApp {
             ui.colored_label(egui::Color32::RED, e);
         }
         if st == StreamUiStatus::Unconfigured {
-            ui.label("Set Chainlink environment variables in Next.js and restart the BFF.");
+            ui.label("Set CHAINLINK_USER_ID and CHAINLINK_API_KEY environment variables.");
         }
         ui.separator();
         ui.heading("Assets");
