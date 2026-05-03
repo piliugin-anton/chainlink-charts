@@ -1,17 +1,20 @@
-//! Background worker for `GET /api/chainlink/stream` (brace-balanced JSON chunks).
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::StreamExt;
-use reqwest::StatusCode;
-use serde_json::Value;
+use chainlink_data_streams_report::feed_id::ID;
+use chainlink_data_streams_report::report::decode_full_report;
+use chainlink_data_streams_report::report::v3::ReportDataV3;
+use chainlink_data_streams_sdk::config::Config;
+use chainlink_data_streams_sdk::stream::{Stream, StreamError};
 use tokio::time::sleep;
 
-use crate::json_chunks::feed_json_chunks;
+use crate::assets::ASSET_LIST;
 use crate::price::decode_chainlink_price;
 use crate::unix_time::event_time_to_unix_sec;
+
+const SDK_REST_URL: &str = "https://api.dataengine.chain.link";
+const SDK_WS_URL: &str = "wss://ws.dataengine.chain.link";
 
 #[derive(Clone, Default)]
 pub struct LastPrice {
@@ -28,34 +31,48 @@ pub enum StreamUiStatus {
     Unconfigured,
 }
 
-fn price_field_as_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Number(n) => n.as_f64().or_else(|| n.as_i64().map(|i| i as f64)),
-        _ => None,
-    }
-}
-
-fn time_field_as_i64(v: &Value) -> Option<i64> {
-    match v {
-        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
-        _ => None,
-    }
-}
-
 /// Maximum ticks held per symbol while the UI is not rendering (e.g. window minimised).
-/// Older ticks beyond this limit are dropped; only the newest are kept.
 const MAX_PENDING_TICKS: usize = 1000;
 
+fn feed_id_to_symbol(id: &ID) -> Option<String> {
+    let hex = id.to_hex_string();
+    ASSET_LIST
+        .iter()
+        .find(|a| a.feed_id.eq_ignore_ascii_case(&hex))
+        .map(|a| a.api_symbol.to_string())
+}
+
 pub async fn stream_loop(
-    base_url: String,
-    client: reqwest::Client,
+    user_id: String,
+    api_key: String,
     ctx: egui::Context,
     prices: Arc<Mutex<HashMap<String, LastPrice>>>,
     tick_queue: Arc<Mutex<HashMap<String, Vec<LastPrice>>>>,
     status: Arc<Mutex<StreamUiStatus>>,
     last_err: Arc<Mutex<Option<String>>>,
 ) {
-    let url = format!("{}/api/chainlink/stream", base_url.trim_end_matches('/'));
+    let feed_ids: Vec<ID> = ASSET_LIST
+        .iter()
+        .filter_map(|a| ID::from_hex_str(a.feed_id).ok())
+        .collect();
+
+    let config = match Config::new(
+        user_id.clone(),
+        api_key.clone(),
+        SDK_REST_URL.to_string(),
+        SDK_WS_URL.to_string(),
+    )
+    .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            *status.lock().unwrap() = StreamUiStatus::Unconfigured;
+            *last_err.lock().unwrap() = Some(e.to_string());
+            ctx.request_repaint();
+            return;
+        }
+    };
+
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -70,8 +87,14 @@ pub async fn stream_loop(
         *last_err.lock().unwrap() = None;
         ctx.request_repaint();
 
-        let res = match client.get(&url).send().await {
-            Ok(r) => r,
+        let mut stream = match Stream::new(&config, feed_ids.clone()).await {
+            Ok(s) => s,
+            Err(StreamError::AuthError(_)) => {
+                *status.lock().unwrap() = StreamUiStatus::Unconfigured;
+                *last_err.lock().unwrap() = Some("credentials missing or invalid".into());
+                ctx.request_repaint();
+                return;
+            }
             Err(e) => {
                 *status.lock().unwrap() = StreamUiStatus::Error;
                 *last_err.lock().unwrap() = Some(e.to_string());
@@ -82,21 +105,9 @@ pub async fn stream_loop(
             }
         };
 
-        if res.status() == StatusCode::SERVICE_UNAVAILABLE {
-            *status.lock().unwrap() = StreamUiStatus::Unconfigured;
-            ctx.request_repaint();
-            return;
-        }
-
-        if !res.status().is_success() {
-            let status_code = res.status();
-            let t = res.text().await.unwrap_or_default();
+        if let Err(e) = stream.listen().await {
             *status.lock().unwrap() = StreamUiStatus::Error;
-            *last_err.lock().unwrap() = Some(format!(
-                "HTTP {} {}",
-                status_code,
-                t.chars().take(200).collect::<String>()
-            ));
+            *last_err.lock().unwrap() = Some(e.to_string());
             ctx.request_repaint();
             sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -107,67 +118,64 @@ pub async fn stream_loop(
         backoff = Duration::from_secs(1);
         ctx.request_repaint();
 
-        let mut stream = res.bytes_stream();
-        let mut buf = String::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = match chunk {
-                Ok(c) => c,
+        loop {
+            match stream.read().await {
+                Err(StreamError::AuthError(_)) => {
+                    *status.lock().unwrap() = StreamUiStatus::Unconfigured;
+                    *last_err.lock().unwrap() = Some("credentials missing or invalid".into());
+                    ctx.request_repaint();
+                    let _ = stream.close().await;
+                    return;
+                }
                 Err(e) => {
                     *status.lock().unwrap() = StreamUiStatus::Error;
                     *last_err.lock().unwrap() = Some(e.to_string());
                     ctx.request_repaint();
+                    let _ = stream.close().await;
                     break;
                 }
-            };
-            let piece = String::from_utf8_lossy(&chunk);
-            let (new_buf, messages) = feed_json_chunks(&buf, &piece);
-            buf = new_buf;
+                Ok(ws_report) => {
+                    let report = &ws_report.report;
+                    let Some(sym) = feed_id_to_symbol(&report.feed_id) else {
+                        continue;
+                    };
 
-            let mut changed = false;
-            let mut ticks_to_queue: Vec<(String, LastPrice)> = Vec::new();
-            {
-                let mut map = prices.lock().unwrap();
-                for msg in messages {
-                    let Some(obj) = msg.as_object() else {
-                        continue;
+                    let full_report_hex = report.full_report.trim_start_matches("0x");
+                    let bytes = match hex::decode(full_report_hex) {
+                        Ok(b) => b,
+                        Err(_) => continue,
                     };
-                    if obj.contains_key("heartbeat") {
-                        continue;
-                    }
-                    if obj.get("f").and_then(|v| v.as_str()) != Some("t") {
-                        continue;
-                    }
-                    let Some(sym) = obj.get("i").and_then(|v| v.as_str()) else {
-                        continue;
+
+                    let (_, blob) = match decode_full_report(&bytes) {
+                        Ok(v) => v,
+                        Err(_) => continue,
                     };
-                    let Some(p) = obj.get("p").and_then(price_field_as_f64) else {
-                        continue;
+
+                    let v3 = match ReportDataV3::decode(&blob) {
+                        Ok(r) => r,
+                        Err(_) => continue,
                     };
-                    let Some(t) = obj.get("t").and_then(time_field_as_i64) else {
-                        continue;
-                    };
-                    let t = event_time_to_unix_sec(t);
-                    let price = decode_chainlink_price(p);
+
+                    let raw_f64: f64 = v3.benchmark_price.to_string().parse().unwrap_or(0.0);
+                    let price = decode_chainlink_price(raw_f64);
+                    let t = event_time_to_unix_sec(v3.valid_from_timestamp as i64);
+
                     let lp = LastPrice { price, t };
-                    map.insert(sym.to_string(), lp.clone());
-                    ticks_to_queue.push((sym.to_string(), lp));
-                    changed = true;
-                }
-            }
-            if !ticks_to_queue.is_empty() {
-                let mut queue = tick_queue.lock().unwrap();
-                for (sym, lp) in ticks_to_queue {
-                    let entry = queue.entry(sym).or_insert_with(Vec::new);
-                    entry.push(lp);
-                    if entry.len() > MAX_PENDING_TICKS {
-                        let excess = entry.len() - MAX_PENDING_TICKS;
-                        entry.drain(..excess);
+                    {
+                        let mut map = prices.lock().unwrap();
+                        map.insert(sym.clone(), lp.clone());
                     }
+                    {
+                        let mut queue = tick_queue.lock().unwrap();
+                        let entry = queue.entry(sym).or_insert_with(Vec::new);
+                        entry.push(lp);
+                        if entry.len() > MAX_PENDING_TICKS {
+                            let excess = entry.len() - MAX_PENDING_TICKS;
+                            entry.drain(..excess);
+                        }
+                    }
+                    ctx.request_repaint();
                 }
-            }
-            if changed {
-                ctx.request_repaint();
             }
         }
 
