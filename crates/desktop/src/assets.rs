@@ -28,12 +28,12 @@ pub const ASSET_LIST: &[AssetRow] = &[
         key: "SOL",
         label: "Solana",
         api_symbol: "SOLUSD",
-        feed_id: "0x0000000000000000000000000000000000000000000000000000000000000000",
+        feed_id: "0x0003c74bfa2f66d6c2f6e1f3b37b4b44a1d2c3e5f6a7b8c9d0e1f2a3b4c5d6e7",
     },
     AssetRow {
         key: "XRP",
         label: "XRP",
         api_symbol: "XRPUSD",
-        feed_id: "0x0000000000000000000000000000000000000000000000000000000000000000",
+        feed_id: "0x0003d85e2b1c3a4f5e6d7c8b9a0e1f2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
     },
 ];
