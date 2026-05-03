@@ -2,14 +2,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const AUTHORIZE_URL: &str = "https://priceapi.dataengine.chain.link/api/v1/authorize";
 const SKEW_SECS: i64 = 90;
 
+/// Candlestick API authorize body: `login` = user ID, `password` = API key (see Chainlink docs).
+#[derive(Serialize)]
+struct AuthorizeForm<'a> {
+    login: &'a str,
+    password: &'a str,
+}
+
 #[derive(Clone)]
-struct CachedToken {
+pub struct CachedToken {
     token: String,
     expires_at: i64,
 }
@@ -50,12 +56,22 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Drop a cached JWT (e.g. after history returns 401 so we mint a fresh one).
+pub fn invalidate_token_cache(cache: &TokenCache) {
+    *cache.lock().unwrap() = None;
+}
+
 pub async fn get_token(
     client: &Client,
     cache: &TokenCache,
+    price_api_base: &str,
     user_id: &str,
     api_key: &str,
 ) -> Result<String, AuthError> {
+    let base = price_api_base.trim().trim_end_matches('/');
+    let login = user_id.trim();
+    let password = api_key.trim();
+
     {
         let guard = cache.lock().unwrap();
         if let Some(ref cached) = *guard {
@@ -65,12 +81,12 @@ pub async fn get_token(
         }
     }
 
-    let resp = client
-        .post(AUTHORIZE_URL)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!("login={}&password={}", user_id, api_key))
-        .send()
-        .await?;
+    let url = format!("{base}/api/v1/authorize");
+    let form = AuthorizeForm {
+        login,
+        password,
+    };
+    let resp = client.post(url).form(&form).send().await?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -91,9 +107,13 @@ pub async fn get_token(
 
     let data = parsed.d.ok_or_else(|| AuthError::Invalid("missing d field".into()))?;
 
-    let token = data.access_token.clone();
+    let token = data.access_token.trim().to_string();
+    if token.is_empty() {
+        return Err(AuthError::Invalid("empty access_token".into()));
+    }
+
     *cache.lock().unwrap() = Some(CachedToken {
-        token: data.access_token,
+        token: token.clone(),
         expires_at: data.expiration,
     });
 

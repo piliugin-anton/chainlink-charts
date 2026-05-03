@@ -225,6 +225,7 @@ pub enum Screen {
 }
 
 pub struct ChainlinkApp {
+    price_api_base: String,
     user_id: String,
     api_key: String,
     token_cache: auth::TokenCache,
@@ -239,12 +240,13 @@ pub struct ChainlinkApp {
 }
 
 impl ChainlinkApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, runtime: Handle) -> Self {
-        let user_id = std::env::var("CHAINLINK_USER_ID")
-            .expect("CHAINLINK_USER_ID env var is required");
-        let api_key = std::env::var("CHAINLINK_API_KEY")
-            .expect("CHAINLINK_API_KEY env var is required");
-
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        runtime: Handle,
+        price_api_base: String,
+        user_id: String,
+        api_key: String,
+    ) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -268,6 +270,7 @@ impl ChainlinkApp {
         ));
 
         Self {
+            price_api_base,
             user_id,
             api_key,
             token_cache,
@@ -291,6 +294,7 @@ impl ChainlinkApp {
         *slot.lock().expect("history lock") = None;
         let client = self.client.clone();
         let cache = self.token_cache.clone();
+        let price_api_base_for_fetch = self.price_api_base.clone();
         let user_id = self.user_id.clone();
         let api_key = self.api_key.clone();
         let ctx = self.egui_ctx.clone();
@@ -300,6 +304,7 @@ impl ChainlinkApp {
             let body = candlestick::fetch_history(
                 &client,
                 &cache,
+                &price_api_base_for_fetch,
                 &user_id,
                 &api_key,
                 &api_symbol,
