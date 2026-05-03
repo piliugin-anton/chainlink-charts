@@ -28,8 +28,8 @@ pub async fn fetch_history(
     client: &Client,
     cache: &TokenCache,
     price_api_base: &str,
-    user_id: &str,
-    api_key: &str,
+    candlestick_user_id: &str,
+    candlestick_api_key: &str,
     symbol: &str,
     resolution: &str,
     from_sec: i64,
@@ -40,7 +40,8 @@ pub async fn fetch_history(
     let to_s = to_sec.to_string();
 
     for attempt in 0u8..2 {
-        let token = auth::get_token(client, cache, base, user_id, api_key).await?;
+        let token = auth::get_token(client, cache, base, candlestick_user_id, candlestick_api_key)
+            .await?;
 
         let resp = client
             .get(format!("{base}/api/v1/history/rows"))

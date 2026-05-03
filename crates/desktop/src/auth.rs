@@ -65,19 +65,23 @@ pub async fn get_token(
     client: &Client,
     cache: &TokenCache,
     price_api_base: &str,
-    user_id: &str,
-    api_key: &str,
+    candlestick_user_id: &str,
+    candlestick_api_key: &str,
 ) -> Result<String, AuthError> {
     let base = price_api_base.trim().trim_end_matches('/');
-    let login = user_id.trim();
-    let password = api_key.trim();
+    let login = candlestick_user_id.trim();
+    let password = candlestick_api_key.trim();
 
     {
         let guard = cache.lock().unwrap();
-        if let Some(ref cached) = *guard {
-            if cached.expires_at - SKEW_SECS > now_secs() {
-                return Ok(cached.token.clone());
+        match guard.as_ref() {
+            Some(cached) => {
+                let considered_valid = cached.expires_at - SKEW_SECS > now_secs();
+                if considered_valid {
+                    return Ok(cached.token.clone());
+                }
             }
+            None => {}
         }
     }
 

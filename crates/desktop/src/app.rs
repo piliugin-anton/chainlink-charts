@@ -226,8 +226,8 @@ pub enum Screen {
 
 pub struct ChainlinkApp {
     price_api_base: String,
-    user_id: String,
-    api_key: String,
+    candlestick_user_id: String,
+    candlestick_api_key: String,
     token_cache: auth::TokenCache,
     runtime: Handle,
     client: Client,
@@ -244,8 +244,12 @@ impl ChainlinkApp {
         cc: &eframe::CreationContext<'_>,
         runtime: Handle,
         price_api_base: String,
-        user_id: String,
-        api_key: String,
+        sdk_rest_url: String,
+        sdk_ws_url: String,
+        candlestick_user_id: String,
+        candlestick_api_key: String,
+        stream_api_key: String,
+        stream_api_secret: String,
     ) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
@@ -259,9 +263,15 @@ impl ChainlinkApp {
         let stream_err = Arc::new(Mutex::new(None));
         let token_cache = auth::new_token_cache();
 
+        let streams_testnet = price_api_base
+            .to_ascii_lowercase()
+            .contains("testnet");
         runtime.spawn(stream::stream_loop(
-            user_id.clone(),
-            api_key.clone(),
+            stream_api_key.clone(),
+            stream_api_secret.clone(),
+            sdk_rest_url.clone(),
+            sdk_ws_url.clone(),
+            streams_testnet,
             egui_ctx.clone(),
             stream_prices.clone(),
             tick_queue.clone(),
@@ -271,8 +281,8 @@ impl ChainlinkApp {
 
         Self {
             price_api_base,
-            user_id,
-            api_key,
+            candlestick_user_id,
+            candlestick_api_key,
             token_cache,
             runtime,
             client,
@@ -295,8 +305,8 @@ impl ChainlinkApp {
         let client = self.client.clone();
         let cache = self.token_cache.clone();
         let price_api_base_for_fetch = self.price_api_base.clone();
-        let user_id = self.user_id.clone();
-        let api_key = self.api_key.clone();
+        let candlestick_user_id = self.candlestick_user_id.clone();
+        let candlestick_api_key = self.candlestick_api_key.clone();
         let ctx = self.egui_ctx.clone();
         self.runtime.spawn(async move {
             let now = unix_now_secs();
@@ -305,8 +315,8 @@ impl ChainlinkApp {
                 &client,
                 &cache,
                 &price_api_base_for_fetch,
-                &user_id,
-                &api_key,
+                &candlestick_user_id,
+                &candlestick_api_key,
                 &api_symbol,
                 resolution.as_str(),
                 from,
@@ -351,7 +361,9 @@ impl ChainlinkApp {
             ui.colored_label(egui::Color32::RED, e);
         }
         if st == StreamUiStatus::Unconfigured {
-            ui.label("Set CHAINLINK_USER_ID and CHAINLINK_API_KEY environment variables.");
+            ui.label(
+                "Check CHAINLINK_STREAM_API_KEY / CHAINLINK_STREAM_API_SECRET (stream), CHAINLINK_USER_ID / CHAINLINK_API_KEY (Candlestick), and CHAINLINK_BASE_URL (testnet vs mainnet).",
+            );
         }
         ui.separator();
         ui.heading("Assets");
