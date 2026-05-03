@@ -2,7 +2,7 @@
 name = "chainlink-charts-desktop"
 version = "0.1.0"
 edition = "2021"
-description = "Native desktop client for chainlink-charts Next.js BFF"
+description = "Native desktop client connecting directly to Chainlink Data Streams"
 
 [dependencies]
 eframe = { version = "0.34", default-features = true, features = ["default_fonts", "glow"] }
@@ -13,4 +13,6 @@ serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 thiserror = "2"
-futures-util = "0.3"
+hex = "0.4"
+chainlink-data-streams-sdk = { version = "1.2.1", features = ["websocket"] }
+chainlink-data-streams-report = "1.2.1"
