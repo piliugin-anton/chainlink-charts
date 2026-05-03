@@ -1,10 +1,7 @@
-//! Desktop client for the chainlink-charts Next.js BFF.
-//!
-//! Base URL: `CHAINLINK_CHARTS_BASE_URL` (default `http://127.0.0.1:3000`).
-
 mod app;
 mod assets;
-mod bff;
+mod auth;
+mod candlestick;
 mod chart;
 mod json_chunks;
 mod price;
