@@ -61,12 +61,16 @@ pub async fn stream_loop(
     status: Arc<Mutex<StreamUiStatus>>,
     last_err: Arc<Mutex<Option<String>>>,
 ) {
+    // SDK default `ws_max_reconnect` is 5; after that the background reader task exits.
+    // `Stream` still holds an `mpsc::Sender`, so `read()` never returns `StreamClosed` and
+    // our outer reconnect loop never runs — keep retrying inside the SDK instead.
     let config = match Config::new(
         stream_api_key.clone(),
         stream_api_secret.clone(),
         sdk_rest_url.clone(),
         sdk_ws_url.clone(),
     )
+    .with_ws_max_reconnect(usize::MAX)
     .build()
     {
         Ok(c) => c,
