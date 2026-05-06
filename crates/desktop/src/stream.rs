@@ -8,7 +8,7 @@ use chainlink_data_streams_report::report::v3::ReportDataV3;
 use chainlink_data_streams_sdk::client::Client as StreamsRestClient;
 use chainlink_data_streams_sdk::config::Config;
 use chainlink_data_streams_sdk::stream::{Stream, StreamError};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::assets::ASSET_LIST;
 use crate::price::decode_chainlink_price;
@@ -31,6 +31,9 @@ pub enum StreamUiStatus {
 
 /// Maximum ticks held per symbol while the UI is not rendering (e.g. window minimised).
 const MAX_PENDING_TICKS: usize = 1000;
+
+/// No decoded report for this long ⇒ treat as stalled and reconnect.
+const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn feed_id_to_symbol(id: &ID) -> Option<String> {
     let hex = id.to_hex_string();
@@ -187,72 +190,84 @@ pub async fn stream_loop(
         ctx.request_repaint();
 
         loop {
-            match stream.read().await {
-                Err(StreamError::AuthError(_)) => {
-                    *status.lock().unwrap() = StreamUiStatus::Unconfigured;
-                    *last_err.lock().unwrap() = Some("credentials missing or invalid".into());
-                    ctx.request_repaint();
-                    let _ = stream.close().await;
-                    return;
-                }
-                Err(e) => {
-                    if stream_err_is_http_401_unauthorized(&e) {
-                        *status.lock().unwrap() = StreamUiStatus::Unconfigured;
-                        *last_err.lock().unwrap() = Some(
-                            "Data Streams returned HTTP 401. Check CHAINLINK_STREAM_API_KEY / CHAINLINK_STREAM_API_SECRET and CHAINLINK_BASE_URL (testnet vs mainnet).".into(),
-                        );
-                        ctx.request_repaint();
-                        let _ = stream.close().await;
-                        return;
-                    }
+            match timeout(STREAM_READ_TIMEOUT, stream.read()).await {
+                Err(_) => {
                     *status.lock().unwrap() = StreamUiStatus::Error;
-                    *last_err.lock().unwrap() = Some(e.to_string());
+                    *last_err.lock().unwrap() =
+                        Some("stream read timed out (no message within limit)".into());
                     ctx.request_repaint();
                     let _ = stream.close().await;
                     break;
                 }
-                Ok(ws_report) => {
-                    let report = &ws_report.report;
-                    let Some(sym) = feed_id_to_symbol(&report.feed_id) else {
-                        continue;
-                    };
-
-                    let full_report_hex = report.full_report.trim_start_matches("0x");
-                    let bytes = match hex::decode(full_report_hex) {
-                        Ok(b) => b,
-                        Err(_) => continue,
-                    };
-
-                    let (_, blob) = match decode_full_report(&bytes) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    let v3 = match ReportDataV3::decode(&blob) {
-                        Ok(r) => r,
-                        Err(_) => continue,
-                    };
-
-                    let raw_f64: f64 = v3.benchmark_price.to_string().parse().unwrap_or(0.0);
-                    let price = decode_chainlink_price(raw_f64);
-                    let t = event_time_to_unix_sec(v3.valid_from_timestamp as i64);
-
-                    let lp = LastPrice { price, t };
-                    {
-                        let mut map = prices.lock().unwrap();
-                        map.insert(sym.clone(), lp.clone());
+                Ok(read_result) => match read_result {
+                    Err(StreamError::AuthError(_)) => {
+                        *status.lock().unwrap() = StreamUiStatus::Unconfigured;
+                        *last_err.lock().unwrap() =
+                            Some("credentials missing or invalid".into());
+                        ctx.request_repaint();
+                        let _ = stream.close().await;
+                        return;
                     }
-                    {
-                        let mut queue = tick_queue.lock().unwrap();
-                        let entry = queue.entry(sym).or_insert_with(Vec::new);
-                        entry.push(lp);
-                        if entry.len() > MAX_PENDING_TICKS {
-                            let excess = entry.len() - MAX_PENDING_TICKS;
-                            entry.drain(..excess);
+                    Err(e) => {
+                        if stream_err_is_http_401_unauthorized(&e) {
+                            *status.lock().unwrap() = StreamUiStatus::Unconfigured;
+                            *last_err.lock().unwrap() = Some(
+                                "Data Streams returned HTTP 401. Check CHAINLINK_STREAM_API_KEY / CHAINLINK_STREAM_API_SECRET and CHAINLINK_BASE_URL (testnet vs mainnet).".into(),
+                            );
+                            ctx.request_repaint();
+                            let _ = stream.close().await;
+                            return;
                         }
+                        *status.lock().unwrap() = StreamUiStatus::Error;
+                        *last_err.lock().unwrap() = Some(e.to_string());
+                        ctx.request_repaint();
+                        let _ = stream.close().await;
+                        break;
                     }
-                    ctx.request_repaint();
-                }
+                    Ok(ws_report) => {
+                        let report = &ws_report.report;
+                        let Some(sym) = feed_id_to_symbol(&report.feed_id) else {
+                            continue;
+                        };
+
+                        let full_report_hex = report.full_report.trim_start_matches("0x");
+                        let bytes = match hex::decode(full_report_hex) {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        };
+
+                        let (_, blob) = match decode_full_report(&bytes) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+
+                        let v3 = match ReportDataV3::decode(&blob) {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
+
+                        let raw_f64: f64 =
+                            v3.benchmark_price.to_string().parse().unwrap_or(0.0);
+                        let price = decode_chainlink_price(raw_f64);
+                        let t = event_time_to_unix_sec(v3.valid_from_timestamp as i64);
+
+                        let lp = LastPrice { price, t };
+                        {
+                            let mut map = prices.lock().unwrap();
+                            map.insert(sym.clone(), lp.clone());
+                        }
+                        {
+                            let mut queue = tick_queue.lock().unwrap();
+                            let entry = queue.entry(sym).or_insert_with(Vec::new);
+                            entry.push(lp);
+                            if entry.len() > MAX_PENDING_TICKS {
+                                let excess = entry.len() - MAX_PENDING_TICKS;
+                                entry.drain(..excess);
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                },
             }
         }
 
